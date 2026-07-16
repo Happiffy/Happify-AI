@@ -63,6 +63,16 @@ def re_split(pattern: str, text: str) -> List[str]:
     return re.split(pattern, text)
 
 
+def safe_str(text: str) -> str:
+    """Encodes a string to the console's encoding, replacing unmappable characters to avoid crashes."""
+    import sys
+    encoding = sys.stdout.encoding or "utf-8"
+    try:
+        return text.encode(encoding, errors="replace").decode(encoding)
+    except Exception:
+        return text.encode("ascii", errors="replace").decode("ascii")
+
+
 # ==========================================
 # MAIN TEST SUITE EXECUTION
 # ==========================================
@@ -137,7 +147,7 @@ def run_evaluation():
             )
             
             if response.status_code != 200:
-                print(f"    Endpoint returned error {response.status_code}: {response.text}")
+                print(f"    Endpoint returned error {response.status_code}: {safe_str(response.text)}")
                 continue
                 
             data = response.json()
@@ -186,16 +196,16 @@ def run_evaluation():
             latencies["total"].append(total_ms)
             
             # Print individual test case results
-            print(f"     Transcript: '{transcribed_text}'")
-            print(f"    Ground Truth: '{ground_truth}'")
+            print(f"     Transcript: '{safe_str(transcribed_text)}'")
+            print(f"    Ground Truth: '{safe_str(ground_truth)}'")
             print(f"    STT Accuracy: {stt_acc * 100:.1f}%")
-            print(f"    Response  : '{response_msg}' ({s_count} sentences, Compliant: {is_compliant})")
-            print(f"    Emotion   : {emotion_state}")
-            print(f"   ⏱  Latencies : STT={stt_ms}ms | AI={ai_ms}ms | TTS={tts_ms}ms | Total={total_ms}ms")
+            print(f"    Response  : '{safe_str(response_msg)}' ({s_count} sentences, Compliant: {is_compliant})")
+            print(f"    Emotion   : {safe_str(emotion_state)}")
+            print(f"    Latencies : STT={stt_ms}ms | AI={ai_ms}ms | TTS={tts_ms}ms | Total={total_ms}ms")
             print("-" * 60)
             
         except Exception as e:
-            print(f"    Request failed: {e}")
+            print(f"    Request failed: {safe_str(str(e))}")
             print("-" * 60)
 
     # 4. Final Aggregated Evaluation Reports
@@ -222,17 +232,17 @@ def run_evaluation():
     print(f"STT Language Auto-Detection: Enabled (Bahasa Indonesia / English)")
     print("-" * 60)
     print(f" ACCURACY PERFORMANCE:")
-    print(f"   • Mean STT Transcription Accuracy (Char-level): {avg_stt_acc:.2f}%")
-    print(f"   • Seniors Cognitive Length Compliance (<= 2 sentences): {cognitive_pass_rate:.1f}% Pass Rate")
-    print(f"   • Average Output Sentences: {avg_sentence_len:.2f}")
+    print(f"   - Mean STT Transcription Accuracy (Char-level): {avg_stt_acc:.2f}%")
+    print(f"   - Seniors Cognitive Length Compliance (<= 2 sentences): {cognitive_pass_rate:.1f}% Pass Rate")
+    print(f"   - Average Output Sentences: {avg_sentence_len:.2f}")
     print("-" * 60)
-    print(f"⏱ LATENCY & EFFICIENCY (SLA Target: <= 1.5 seconds / 1500ms):")
-    print(f"   • Mean Audio Stream Read Latency: {sum(latencies['total']) - sum(latencies['stt']) - sum(latencies['ai']) - sum(latencies['tts']):.2f} ms")
-    print(f"   • Mean STT Processing Latency    : {avg_stt:.2f} ms")
-    print(f"   • Mean LLM AI Generation Latency : {avg_ai:.2f} ms")
-    print(f"   • Mean TTS Synthesis Latency     : {avg_tts:.2f} ms")
-    print(f"   • Mean Total Pipeline Latency    : {avg_total:.2f} ms")
-    print(f"   • Latency SLA Target Pass Rate   : {sla_compliance:.1f}%")
+    print(f" LATENCY & EFFICIENCY (SLA Target: <= 1.5 seconds / 1500ms):")
+    print(f"   - Mean Audio Stream Read Latency: {sum(latencies['total']) - sum(latencies['stt']) - sum(latencies['ai']) - sum(latencies['tts']):.2f} ms")
+    print(f"   - Mean STT Processing Latency    : {avg_stt:.2f} ms")
+    print(f"   - Mean LLM AI Generation Latency : {avg_ai:.2f} ms")
+    print(f"   - Mean TTS Synthesis Latency     : {avg_tts:.2f} ms")
+    print(f"   - Mean Total Pipeline Latency    : {avg_total:.2f} ms")
+    print(f"   - Latency SLA Target Pass Rate   : {sla_compliance:.1f}%")
     print("============================================================\n")
 
     # Generate Charts
@@ -343,7 +353,7 @@ def generate_visualization(latencies: dict, num_cases: int, stt_scores: list):
         print(f" Accuracy visualization saved successfully as '{accuracy_image}'!")
         
     except ImportError:
-        print("\n💡 Tip: To generate visualization graphs, install matplotlib:")
+        print("\n Tip: To generate visualization graphs, install matplotlib:")
         print("   pip install matplotlib")
     except Exception as e:
         print(f" Failed to generate charts: {e}")

@@ -8,6 +8,19 @@ from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
 
+# Add NVIDIA library paths to DLL search path and system PATH for CUDA 12 on Windows
+import site
+for prefix in site.getsitepackages():
+    nvidia_dir = Path(prefix) / "nvidia"
+    if nvidia_dir.exists():
+        for root, dirs, files in os.walk(nvidia_dir):
+            if any(f.endswith(".dll") for f in files):
+                try:
+                    os.add_dll_directory(root)
+                except Exception:
+                    pass
+                os.environ["PATH"] = f"{root};" + os.environ["PATH"]
+
 import httpx
 from faster_whisper import WhisperModel
 import edge_tts
@@ -73,12 +86,22 @@ class VoiceProcessor:
         self.audio_cache_dir.mkdir(parents=True, exist_ok=True)
         
         self.stt_model = None
+        self.stt_device = "cpu"
 
     def load(self) -> None:
-        print("⚙️ Initializing local Faster-Whisper (CPU)...")
-        # Load Faster-Whisper on CPU with 4 threads for faster execution
-        self.stt_model = WhisperModel(STT_MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=4)
-        print("✅ STT model loaded successfully. Gateway is ready.")
+        try:
+            print("Initializing local Faster-Whisper on GPU (CUDA)...")
+            # Load Faster-Whisper on CUDA with float16 for fast GPU inference
+            self.stt_model = WhisperModel(STT_MODEL_SIZE, device="cuda", compute_type="float16")
+            self.stt_device = "cuda"
+            print("STT model loaded successfully on GPU (CUDA). Gateway is ready.")
+        except Exception as e:
+            print(f"Failed to load Faster-Whisper on GPU: {e}")
+            print("Falling back to local Faster-Whisper on CPU...")
+            # Load Faster-Whisper on CPU with 4 threads for faster execution
+            self.stt_model = WhisperModel(STT_MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=4)
+            self.stt_device = "cpu"
+            print("STT model loaded successfully on CPU. Gateway is ready.")
 
     def config_from_request(self, request: Request) -> VoiceRequestConfig:
         return VoiceRequestConfig(
@@ -89,7 +112,7 @@ class VoiceProcessor:
         )
 
     # ── Layer 0: STT (Local Faster-Whisper) ───────────────────────────────────
-    async def transcribe(self, audio_bytes: bytes) -> tuple[str, str, float]:
+    async def transcribe(self, audio_bytes: bytes, target_language: Optional[str] = None) -> tuple[str, str, float]:
         if self.stt_model is None:
             raise RuntimeError("STT model is not initialized")
             
@@ -100,14 +123,15 @@ class VoiceProcessor:
         try:
             loop = asyncio.get_running_loop()
             def run_whisper():
-                segments, info = self.stt_model.transcribe(str(temp_file), beam_size=3)
+                # Pass the explicit target language if provided to avoid detection errors
+                segments, info = self.stt_model.transcribe(str(temp_file), beam_size=3, language=target_language)
                 transcript = " ".join([segment.text for segment in segments]).strip()
                 return transcript, info.language, info.language_probability
 
             transcript, detected_lang, confidence = await loop.run_in_executor(None, run_whisper)
             
             if confidence < 0.7:
-                print(f"⚠️ [COMPLIANCE ALERT] Low STT confidence ({confidence:.2f}).")
+                print(f"[COMPLIANCE ALERT] Low STT confidence ({confidence:.2f}).")
                 if detected_lang != "en":
                     detected_lang = "en"
                     
@@ -166,7 +190,7 @@ class VoiceProcessor:
                     return content[:260], "ollama_qwen"
                     
         except Exception as e:
-            print(f"❌ Ollama response generation failed: {e}")
+            print(f"Ollama response generation failed: {e}")
             
         return self._fallback_response_for(transcript, language), "fallback"
 
@@ -210,7 +234,7 @@ class VoiceProcessor:
                         confidence=float(data_json.get("confidence", 0.5)),
                     )
         except Exception as e:
-            print(f"❌ Ollama emotion analysis failed: {e}")
+            print(f"Ollama emotion analysis failed: {e}")
             
         return EmotionData(state="neutral", confidence=0.5)
 
@@ -301,7 +325,8 @@ async def health() -> dict:
     status = "healthy"
     try:
         async with httpx.AsyncClient() as client:
-            res = await client.get(OLLAMA_API_URL.replace("/chat", ""), timeout=1.0)
+            # Query the root Ollama service endpoint instead of /api which returns 404
+            res = await client.get(OLLAMA_API_URL.split("/api")[0] + "/", timeout=1.0)
             if res.status_code != 200:
                 status = "unhealthy_ollama_not_responding"
     except Exception:
@@ -310,7 +335,7 @@ async def health() -> dict:
     return {
         "status": "healthy" if processor.stt_model is not None and status == "healthy" else "degraded",
         "ollama_status": status,
-        "stt_model": "Faster-Whisper (Local CPU)",
+        "stt_model": f"Faster-Whisper (Local {processor.stt_device.upper()})",
         "llm_model": f"Ollama ({OLLAMA_MODEL_NAME})",
         "language": processor.language,
     }
@@ -328,7 +353,7 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
     try:
         # Layer 0: STT — must complete before response generation
         stt_start = time.perf_counter()
-        transcript, language, confidence = await processor.transcribe(audio_bytes)
+        transcript, language, confidence = await processor.transcribe(audio_bytes, cfg.language)
         stt_ms = round((time.perf_counter() - stt_start) * 1000, 2)
 
         # Layer 1 + Layer 3 run in parallel
@@ -345,7 +370,7 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
         tts_ms = round((time.perf_counter() - tts_start) * 1000, 2)
 
     except Exception as error:
-        print(f"❌ Error processing audio interaction: {error}")
+        print(f"Error processing audio interaction: {error}")
         raise HTTPException(status_code=500, detail=str(error)) from error
 
     total_ms = round((time.perf_counter() - start) * 1000, 2)
