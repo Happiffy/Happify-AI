@@ -378,10 +378,6 @@ class ProcessAudioResponse(BaseModel):
     latency_ms: float
 
 
-class TestTTSRequest(BaseModel):
-    text: Optional[str] = Field(default=None, max_length=1000)
-
-
 class AnalyzeJournalRequest(BaseModel):
     content: str = Field(max_length=10000)
     language: Literal["en", "id"] = "en"
@@ -1538,17 +1534,6 @@ async def analyze_journal(body: AnalyzeJournalRequest) -> AnalyzeJournalResponse
 @app.post("/api/fuse-observations", response_model=MultimodalFusionResponse)
 async def fuse_observations(body: MultimodalFusionRequest) -> MultimodalFusionResponse:
     return fuse_multimodal(body)
-
-
-@app.post("/api/test-tts")
-async def test_tts(request: Request, body: TestTTSRequest) -> dict[str, Optional[str]]:
-    cfg = processor.config_from_request(request)
-    text = (
-        body.text
-        or "Hello, I am Happify. I am here to support you, one step at a time."
-    )
-    audio_url = await processor.generate_audio(text, cfg)
-    return {"audio_url": audio_url, "audioUrl": audio_url, "text": text}
 
 
 @app.get("/api/audio/{filename}")

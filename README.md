@@ -1,127 +1,251 @@
 # Happify AI Service
 
-FastAPI voice service for local speech transcription, deterministic transcript risk rules, governed lexical retrieval, optional Ollama responses, recording-quality metrics, Edge TTS, and optional fusion of caller-supplied extracted camera observations.
+AI service untuk Happify Companion dan fitur kesehatan mental berbasis voice. Service ini menangani transkripsi audio, response percakapan, analisis mood, analisis risiko, analisis journal, dan optional text-to-speech.
 
-This service provides supportive software behavior only. It is not a diagnostic system, emergency service, clinically validated product, or hardware validation tool. Recording-quality fields describe the uploaded recording and do not infer health conditions. The observation-fusion endpoint accepts structured outputs already extracted by caller-declared hardware/models; it does not accept raw images and does not provide or claim computer vision.
+---
 
-## Runtime flow
+## Overview
 
-1. Authenticate `/api/*` with `Authorization: Bearer <AI_SERVICE_TOKEN>`.
-2. Accept a bounded audio upload and normalize it with ffmpeg to mono 16 kHz PCM WAV.
-3. Extract stdlib-only recording metrics: duration, peak/RMS dBFS, clipping ratio, silence ratio, DC offset, and descriptive quality flags.
-4. Transcribe locally with Faster-Whisper.
-5. Apply deterministic transcript risk and trigger rules before LLM processing.
-6. Retrieve governed source entries with deterministic lexical matching and return structured citations.
-7. Render prompts from a versioned registry and expose registry and prompt hashes.
-8. Generate an English response with Ollama or local fallback behavior. Generated classification can raise risk but cannot lower deterministic severity.
-9. Replace high/crisis generated text with deterministic safety wording and optionally synthesize TTS.
+AI-Happify menerima request terautentikasi dari BE-Happify dan mengembalikan contract terstruktur untuk aplikasi Happify.
 
-## Governed assets
+Service ini dirancang sebagai early-support system. AI membantu pengguna mengenali dan memahami kondisi emosional, tetapi bukan psikolog, psikiater, alat diagnosis, atau layanan emergency.
 
-`knowledge/manifest.v1.json` declares every allowed source file, source version, and SHA-256. Startup fails if metadata or hashes do not match. To update knowledge, add or version a source file, calculate its SHA-256, and update the manifest deliberately.
+---
 
-`prompts/registry.v1.json` contains prompt IDs, semantic versions, and templates. The service computes the registry hash and each template hash at startup and returns the applicable metadata with responses.
+## Tech Stack
 
-Retrieval is local lexical overlap only. Citations identify the manifest version, source ID/title/version, entry ID/title, and lexical score. Citations indicate which governed entries were supplied as context, not that generated wording is validated or clinically endorsed.
+| Area | Stack |
+| --- | --- |
+| Runtime | Python 3.11 |
+| Framework | FastAPI, Uvicorn |
+| Speech-to-Text | Faster-Whisper |
+| Text-to-Speech | Edge TTS |
+| Audio Processing | FFmpeg |
+| LLM Integration | Optional Ollama |
+| Validation | Pydantic |
+| Knowledge Retrieval | Local governed lexical retrieval |
+| Deployment | Docker, Railway |
 
-## API
+---
 
-| Endpoint | Auth | Purpose |
-|---|---|---|
-| `GET /health/live` | None | Process liveness |
-| `GET /health/ready` | None | Readiness for auth, ffmpeg, governed assets, and STT |
-| `GET /health` | None | Readiness-compatible alias |
-| `POST /api/process-audio` | Bearer token | Canonical voice turn plus compatibility fields |
-| `POST /api/analyze-journal` | Bearer token | English reflection with deterministic risk floor and citations |
-| `POST /api/fuse-observations` | Bearer token | Fuse transcript safety with already-extracted camera observations |
-| `POST /api/test-tts` | Bearer token | TTS preview |
-| `GET /api/audio/{filename}` | Bearer token | Cached TTS audio |
+## Features
 
-`POST /api/process-audio` accepts `audio/wav`, `audio/x-wav`, `audio/mpeg`, `audio/mp4`, `audio/webm`, or `audio/ogg`. Useful headers are:
+- **Speech-to-Text** - mengubah audio pengguna menjadi transcript dengan Faster-Whisper.
+- **AI Companion Response** - menghasilkan response suportif untuk percakapan voice.
+- **Mood Analysis** - mendeteksi mood seperti calm, happy, neutral, sad, anxious, dan distressed.
+- **Risk Policy** - menerapkan deterministic risk floor sebelum dan sesudah pemrosesan LLM.
+- **Journal Analysis** - memberikan reflection, mood, risk level, dan suggested action dari journal.
+- **Governed Knowledge** - memakai knowledge source lokal yang diverifikasi hash saat startup.
+- **Versioned Prompts** - memakai prompt registry berversi dengan metadata hash.
+- **Optional TTS** - membuat response audio dengan Edge TTS.
+- **Recording Quality** - mengukur kualitas audio tanpa mengklaim kondisi klinis.
+- **Multimodal Fusion Contract** - menerima hasil observasi kamera yang sudah diekstrak oleh caller.
+- **Privacy Boundaries** - tidak menerima atau menyimpan raw image pada endpoint fusion.
+- **Fallback Mode** - tetap dapat memberikan response dan mood analysis lokal tanpa Ollama.
 
-- `X-Request-ID`: optional caller correlation ID; validated or replaced.
-- `X-Turn-ID`: optional turn correlation ID; validated or replaced.
-- `X-Voice-Language`: `en` or `id` STT hint. User-facing output remains English.
-- `X-Voice-TTS-Voice`: optional Edge TTS voice.
-- `X-Voice-Rate`: signed percentage such as `-10%`.
-- `X-Voice-Enabled`: set to `false` to skip TTS.
-- `X-User-Name`: optional preferred name.
-- `X-Voice-Context`: untrusted application context, explicitly isolated from system instructions.
+---
 
-The canonical response is versioned by `contract_version` and contains `request_id`, `turn_id`, typed `transcript`, `response`, `emotion`, `intent`, `risk_policy`, `recording_quality`, `citations`, `prompt`, and `latency`. Existing top-level fields such as `text`, `message`, `audio_url`, `audioUrl`, `response_source`, `responseSource`, and `latency_ms` remain for current consumers.
+## API Routes
 
-`POST /api/fuse-observations` accepts transcript text or an upstream transcript risk floor plus one or more already-extracted observations containing state, confidence, risk, face presence, eye contact, normalized expression probabilities, provider/model/version, and observation timestamp. Unknown fields are rejected, so raw image payloads are not part of the contract. Observation risk can raise final severity but can never lower the deterministic transcript floor. `CV_FUSION_MAX_OBSERVATIONS` bounds observations per request.
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `GET` | `/health/live` | None | Liveness process |
+| `GET` | `/health/ready` | None | Readiness auth, ffmpeg, assets, dan STT |
+| `GET` | `/health` | None | Alias readiness |
+| `POST` | `/api/process-audio` | Bearer | Transkripsi, response, mood, risk, dan optional TTS |
+| `POST` | `/api/analyze-journal` | Bearer | Journal reflection dan analysis |
+| `POST` | `/api/fuse-observations` | Bearer | Fusion transcript dengan extracted observations |
+| `GET` | `/api/audio/{filename}` | Bearer | Protected cached TTS audio |
 
-## Configuration
+---
 
-Copy `.env.example` to `.env` and set at least:
+## Request Flow
 
-```env
-AI_SERVICE_TOKEN=use-a-long-random-secret
-STT_MODEL_SIZE=base
-STT_DEVICE=auto
-OLLAMA_API_URL=http://localhost:11434/api/chat
+```text
+User voice
+    |
+    v
+BE-Happify
+    |
+    v
+AI-Happify
+    |
+    +--> Normalize audio with FFmpeg
+    +--> Transcribe with Faster-Whisper
+    +--> Apply deterministic risk policy
+    +--> Retrieve governed support context
+    +--> Generate response or local fallback
+    +--> Analyze mood and confidence
+    +--> Optionally generate TTS audio
+    |
+    v
+Structured response to BE-Happify
 ```
 
-Ollama is optional; the service remains available with deterministic fallback responses. `AI_SERVICE_TOKEN`, ffmpeg, the prompt registry, the knowledge manifest, and the STT model are required for readiness.
+---
 
-Cache settings:
+## Environment Variables
 
-- `CACHE_CLEANUP_INTERVAL_SECONDS`: periodic cleanup interval.
-- `TTS_CACHE_TTL_SECONDS`: inactivity lifetime for cached TTS files.
-- `TEMP_FILE_TTL_SECONDS`: lifetime for stale normalization files.
-- `VOICE_AUDIO_CACHE_DIR` and `VOICE_TEMP_DIR`: runtime directories. Railway should mount a persistent volume at `/data` and use `/data/audio_cache` for TTS files; temporary normalized audio should remain under `/tmp`.
+Buat file `.env` dari `.env.example`. Untuk Railway, set variables pada service AI-Happify.
 
-## Railway release configuration
+```env
+PORT=8000
+LOG_LEVEL=INFO
 
-Set these values in the Railway service, not in Git:
+STT_MODEL_SIZE=base
+STT_MODEL_PATH=/models/whisper
+STT_DEVICE=cpu
 
-- `AI_SERVICE_TOKEN`: long random token matching the backend `AI_SERVICE_TOKEN`.
-- `VOICE_AUDIO_CACHE_DIR=/data/audio_cache`.
-- `VOICE_TEMP_DIR=/tmp/happify`.
-- `STT_MODEL_SIZE=base` unless a larger model is deliberately provisioned.
-- `STT_MODEL_PATH=/models/whisper` for the Docker image's baked model.
-- `STT_DEVICE=cpu` for a CPU Railway service.
+OLLAMA_API_URL=
+OLLAMA_API_KEY=
+OLLAMA_MODEL_NAME=qwen2.5:1.5b
 
-Attach a persistent volume at `/data`. Without it, protected audio can disappear after a restart or redeploy. The service runs as the `happify` user; configure the Railway volume/runtime UID according to the platform permissions for non-root containers.
+VOICE_LANGUAGE=en
+VOICE_TTS_VOICE=en-US-JennyNeural
+VOICE_TTS_RATE=-10%
+VOICE_AUDIO_CACHE_DIR=/data/audio_cache
+VOICE_TEMP_DIR=/tmp/happify
 
-Startup performs cleanup, then a periodic task removes expired `tts_*.mp3` and `temp_*` files. Active files are uniquely named and request cleanup also runs in `finally`.
+AI_SERVICE_TOKEN=your_shared_ai_service_token
+MAX_AUDIO_BYTES=6291456
+MAX_CONCURRENT_TURNS=2
+CV_FUSION_MAX_OBSERVATIONS=10
 
-## Run
+KNOWLEDGE_MANIFEST_PATH=/app/knowledge/manifest.v1.json
+PROMPT_REGISTRY_PATH=/app/prompts/registry.v1.json
+CACHE_CLEANUP_INTERVAL_SECONDS=900
+TTS_CACHE_TTL_SECONDS=86400
+TEMP_FILE_TTL_SECONDS=3600
+```
+
+| Variable | Description |
+| --- | --- |
+| `PORT` | Port HTTP service. Railway memakai port `8000` secara default. |
+| `AI_SERVICE_TOKEN` | Bearer token yang harus sama persis dengan token pada BE-Happify. |
+| `STT_MODEL_SIZE` | Ukuran model Faster-Whisper. `base` digunakan untuk MVP. |
+| `STT_MODEL_PATH` | Lokasi model yang dibake ke Docker image. |
+| `STT_DEVICE` | Device inference. Railway CPU memakai `cpu`. |
+| `OLLAMA_API_URL` | Optional URL Ollama. Kosong berarti memakai fallback lokal. |
+| `VOICE_AUDIO_CACHE_DIR` | Lokasi cache TTS. Railway memakai persistent volume `/data`. |
+| `VOICE_TEMP_DIR` | Lokasi file normalisasi audio sementara. |
+| `KNOWLEDGE_MANIFEST_PATH` | Manifest knowledge source yang diverifikasi hash. |
+| `PROMPT_REGISTRY_PATH` | Registry prompt berversi. |
+| `MAX_AUDIO_BYTES` | Batas ukuran audio upload. |
+| `MAX_CONCURRENT_TURNS` | Batas concurrency voice processing. |
+
+BE-Happify memanggil service ini dengan satu URL:
+
+```env
+AI_SERVICE_BASE_URL=https://happify-ai-production.up.railway.app
+```
+
+AI-Happify tidak membutuhkan `AI_VOICE_BASE_URL` atau `AI_JOURNAL_BASE_URL` karena URL tersebut adalah konfigurasi milik BE-Happify.
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Python `3.11`
+- FFmpeg untuk local run
+- Dependency pada `requirements.lock`
+- Model Faster-Whisper atau koneksi untuk download model saat build
+- Optional Ollama jika ingin memakai LLM response eksternal
+
+### Installation
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.lock
+```
+
+### Development
+
+```bash
 python main.py
 ```
 
-Docker:
+Service berjalan pada `http://localhost:8000` secara default.
+
+### Docker
+
+Build image:
 
 ```bash
-AI_SERVICE_TOKEN=use-a-long-random-secret docker compose up --build
+docker build -t happify-ai .
 ```
 
-The Docker image copies the governed knowledge and prompt assets and includes ffmpeg.
-
-## Evaluation
-
-Place the audio files referenced by `test_cases.json` under `test_audio/`, start the service, export the same token used by the service, then run:
+Run container:
 
 ```bash
-AI_SERVICE_TOKEN=use-a-long-random-secret python test_suite.py
+docker run --env-file .env -p 8000:8000 happify-ai
 ```
 
-On PowerShell:
-
-```powershell
-$env:AI_SERVICE_TOKEN = "use-a-long-random-secret"
-python test_suite.py
-```
-
-The suite sends the bearer token, unique request and turn IDs, disables TTS for repeatable evaluation, checks the canonical contract, measures transcription similarity and latency, and compares `intent.trigger` with every `expected_trigger`, including expected `null` values. Missing audio cases are reported as skipped and do not count as passes.
-
-## Verification without test files
+Local Docker Compose:
 
 ```bash
-python -m py_compile main.py test_suite.py
-python -m compileall -q main.py test_suite.py
+docker compose up --build
+```
+
+---
+
+## Railway Deployment
+
+Production AI service menggunakan Railway dengan Dockerfile dari branch `main`.
+
+| Environment | URL |
+| --- | --- |
+| Local | `http://localhost:8000` |
+| Production | `https://happify-ai-production.up.railway.app` |
+
+Railway healthcheck memakai:
+
+```text
+GET /health/ready
+```
+
+Attach persistent volume pada `/data` agar cached TTS audio tidak hilang ketika service restart atau redeploy. Set `STT_DEVICE=cpu` untuk service Railway tanpa GPU.
+
+---
+
+## Verification
+
+```bash
+python -m py_compile main.py mood_analysis.py
+```
+
+Docker verification:
+
+```bash
+docker build -t happify-ai:local .
+```
+
+---
+
+## Safety Boundaries
+
+- AI tidak melakukan diagnosis psikologis.
+- Risk policy deterministic tidak boleh diturunkan oleh hasil LLM.
+- Kondisi high atau crisis memakai safety response yang deterministic.
+- Raw image tidak diterima oleh endpoint multimodal fusion.
+- Knowledge source diverifikasi dengan SHA-256 saat startup.
+- Response audio hanya dapat diakses melalui route terautentikasi.
+- `AI_SERVICE_TOKEN` tidak boleh ditulis ke repository atau README.
+
+---
+
+## Project Structure
+
+```txt
+main.py                         # FastAPI application dan runtime pipeline
+mood_analysis.py                # Local mood fallback analysis
+docker-entrypoint.sh            # Runtime user dan Uvicorn entrypoint
+Dockerfile                      # Production image dan baked Whisper model
+railway.json                    # Railway Docker dan healthcheck config
+requirements.lock               # Python dependency lockfile
+knowledge
+|-- manifest.v1.json            # Knowledge manifest dan source hashes
+|-- sources                     # Governed support guidance
+prompts
+|-- registry.v1.json            # Versioned prompt registry
 ```

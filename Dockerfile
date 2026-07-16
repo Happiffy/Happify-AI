@@ -14,9 +14,7 @@ RUN mkdir -p /models/whisper /app/.hf_cache \
     && python -c "from faster_whisper.utils import download_model; download_model('${STT_MODEL_SIZE}', output_dir='/models/whisper')"
 
 COPY main.py .
-COPY test_suite.py .
-COPY test_runtime.py .
-COPY test_cases.json .
+COPY mood_analysis.py .
 COPY docker-entrypoint.sh .
 RUN chmod 755 docker-entrypoint.sh
 COPY knowledge ./knowledge

@@ -22,10 +22,6 @@ eldercare_adapter/
 merged_eldercare_qwen2/
 lora_checkpoints/
 
-# Generated Evaluation Metrics Charts
-latency_metrics.png
-accuracy_metrics.png
-
 # Telemetry Logs and Runtime Files
 wellness_signals_log.json
 
@@ -33,8 +29,6 @@ wellness_signals_log.json
 elder_input.wav
 dorabot_output.mp3
 *.mp3
-test_audio/*.wav
-!test_audio/.gitkeep
 
 # Local Settings & OS Files
 .DS_Store
