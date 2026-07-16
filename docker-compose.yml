@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  eldora-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eldora-gateway
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persistent cache mappings so model downloads and speech files are preserved
+      - ./audio_cache:/app/audio_cache
+      - ./.hf_cache:/app/.hf_cache
+    environment:
+      - OLLAMA_API_URL=http://host.docker.internal:11434/api/chat
+      - VOICE_LANGUAGE=id
+      - VOICE_TTS_VOICE=id-ID-GadisNeural
+      - VOICE_TTS_RATE=-10%
+    extra_hosts:
+      # Allows the container to communicate with Ollama running on the host machine
+      - "host.docker.internal:host-gateway"
+    
+    # Enable NVIDIA GPU acceleration inside the container (requires NVIDIA Container Toolkit on the host)
+    # If the host doesn't have a GPU or NVIDIA Container Runtime, remove this block to run on CPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

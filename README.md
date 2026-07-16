@@ -81,6 +81,28 @@ The gateway will start on `http://127.0.0.1:8000`. It automatically handles:
 
 ---
 
+## 🐳 Running with Docker
+
+You can run the Eldora Voice Gateway inside a container. This handles all system dependencies (like `ffmpeg`) automatically.
+
+### 1. Build and Start the Container
+Use Docker Compose to build and start the service:
+```bash
+docker compose up --build
+```
+This starts the FastAPI gateway on `http://127.0.0.1:8000`.
+
+### 2. Persistence & Caching
+The [docker-compose.yml](file:///C:/ai-stuff/dora-bot-backend/docker-compose.yml) is configured to map two volumes to your host directory:
+* `./audio_cache`: Persists synthesized Edge-TTS speech files.
+* `./.hf_cache`: Persists downloaded Faster-Whisper models (so they aren't re-downloaded when the container restarts).
+
+### 3. GPU Acceleration in Docker
+* To run STT on the GPU inside Docker, the host machine must have the **[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)** installed.
+* The compose file includes GPU reservation parameters. If your host does not have a GPU or NVIDIA Docker runtime, simply remove the `deploy:` block from the [docker-compose.yml](file:///C:/ai-stuff/dora-bot-backend/docker-compose.yml) file.
+
+---
+
 ## 🧪 Testing & Metrics Evaluation
 
 Eldora includes an automated evaluation suite to verify performance against key quality of service guidelines:
