@@ -4,55 +4,59 @@ import json
 import logging
 import os
 import re
+import secrets
+import site
 import time
-from datetime import datetime, timedelta
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass
-from zoneinfo import ZoneInfo
 
-# Add NVIDIA library paths to DLL search path and system PATH for CUDA 12 on Windows
-import site
 for prefix in site.getsitepackages():
     nvidia_dir = Path(prefix) / "nvidia"
     if nvidia_dir.exists():
-        for root, dirs, files in os.walk(nvidia_dir):
-            if any(f.endswith(".dll") for f in files):
+        for root, _, files in os.walk(nvidia_dir):
+            if any(file.endswith(".dll") for file in files):
                 try:
                     os.add_dll_directory(root)
                 except Exception:
                     pass
                 os.environ["PATH"] = f"{root};" + os.environ["PATH"]
 
-import httpx
-from faster_whisper import WhisperModel
 import edge_tts
-
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
+from faster_whisper import WhisperModel
 from pydantic import BaseModel
 
-# ==========================================
-# CONSTANTS & CONFIGURATION
-# ==========================================
 STT_MODEL_SIZE = os.getenv("STT_MODEL_SIZE", "base")
 STT_DEVICE = os.getenv("STT_DEVICE", "auto").lower()
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "").strip()
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
 OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "qwen2.5:1.5b")
-DEFAULT_VOICES = {
-    "id": "id-ID-GadisNeural",
-    "en": "en-US-JennyNeural",
+AI_SERVICE_TOKEN = os.getenv("AI_SERVICE_TOKEN", "").strip()
+MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_BYTES", "6291456"))
+MAX_CONCURRENT_TURNS = int(os.getenv("MAX_CONCURRENT_TURNS", "2"))
+ALLOWED_AUDIO_TYPES = {
+    "audio/wav",
+    "audio/x-wav",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/webm",
+    "audio/ogg",
 }
+DEFAULT_VOICES = {"id": "id-ID-GadisNeural", "en": "en-US-JennyNeural"}
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger("eldora.ai")
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger("happify.ai")
 
 
 def log_event(event: str, **fields) -> None:
-    payload = {"event": event, **fields}
-    logger.info(json.dumps(payload, default=str, ensure_ascii=False))
+    logger.info(json.dumps({"event": event, **fields}, default=str, ensure_ascii=False))
 
 
 def ollama_headers() -> dict[str, str]:
@@ -61,82 +65,70 @@ def ollama_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {OLLAMA_API_KEY}"}
 
 
-def format_datetime(value: Optional[str]) -> str:
-    if not value:
-        return "waktu yang diminta"
-    try:
-        parsed = datetime.fromisoformat(value)
-        return parsed.strftime("%H:%M")
-    except Exception:
-        return value
-
-# ==========================================
-# GATEWAY RESPONSE MODELS
-# ==========================================
 @dataclass
 class VoiceRequestConfig:
     language: str
     tts_voice: str
     tts_rate: str
     enabled: bool
-    elder_name: str
-    timezone: str
+    preferred_name: str
     context: str
+
 
 class EmotionData(BaseModel):
     state: str = "neutral"
     confidence: float = 0.0
+    risk_level: str = "low"
+    requires_referral: bool = False
+
 
 class IntentData(BaseModel):
     name: str = "general"
     confidence: float = 0.0
-    notify_caregiver: bool = False
-    call_family: bool = False
+    requires_sos: bool = False
+    requires_referral: bool = False
 
-class ReminderPlan(BaseModel):
-    action: str = "none"
-    title: Optional[str] = None
-    message: Optional[str] = None
-    due_at: Optional[str] = None
-    dueAt: Optional[str] = None
-    timezone: Optional[str] = None
-    recurrence_rule: Optional[str] = None
-    recurrenceRule: Optional[str] = None
-    confidence: float = 0.0
-    clarification_question: Optional[str] = None
-    clarificationQuestion: Optional[str] = None
 
 class LatencyBreakdown(BaseModel):
     audio_ms: float
     stt_ms: float
     response_ms: float
     emotion_ms: float
-    reminder_ms: float
     ai_ms: float
     tts_ms: float
     total_ms: float
+
 
 class ProcessAudioResponse(BaseModel):
     text: str
     message: str
     audio_url: Optional[str] = None
     audioUrl: Optional[str] = None
-    language: str = "en"
+    language: str = "id"
     confidence: float = 0.0
     response_source: str
     responseSource: str
     emotion: EmotionData
     intent: IntentData
-    reminder: ReminderPlan
     latency_ms: float
     latency: LatencyBreakdown
+
 
 class TestTTSRequest(BaseModel):
     text: Optional[str] = None
 
-# ==========================================
-# VOICE PROCESSOR (WHISPER + OLLAMA API + EDGE-TTS)
-# ==========================================
+
+class AnalyzeJournalRequest(BaseModel):
+    content: str
+    language: str = "id"
+
+
+class AnalyzeJournalResponse(BaseModel):
+    reflection: str
+    emotion: EmotionData
+    suggested_action: str
+
+
 class VoiceProcessor:
     def __init__(self) -> None:
         self.language = os.getenv("VOICE_LANGUAGE", "en")
@@ -144,366 +136,332 @@ class VoiceProcessor:
         self.tts_rate = os.getenv("VOICE_TTS_RATE", "-10%")
         self.audio_cache_dir = Path(os.getenv("VOICE_AUDIO_CACHE_DIR", "./audio_cache"))
         self.audio_cache_dir.mkdir(parents=True, exist_ok=True)
-        
         self.stt_model = None
         self.stt_device = "cpu"
 
     def load(self) -> None:
         if STT_DEVICE in {"cuda", "gpu"}:
-            log_event("stt_load_start", device="cuda", model=STT_MODEL_SIZE)
-            self.stt_model = WhisperModel(STT_MODEL_SIZE, device="cuda", compute_type="float16")
+            self.stt_model = WhisperModel(
+                STT_MODEL_SIZE, device="cuda", compute_type="float16"
+            )
             self.stt_device = "cuda"
-            log_event("stt_load_success", device="cuda", model=STT_MODEL_SIZE)
             return
-
         if STT_DEVICE == "cpu":
-            log_event("stt_load_start", device="cpu", model=STT_MODEL_SIZE)
-            self.stt_model = WhisperModel(STT_MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=4)
+            self.stt_model = WhisperModel(
+                STT_MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=4
+            )
             self.stt_device = "cpu"
-            log_event("stt_load_success", device="cpu", model=STT_MODEL_SIZE)
             return
-
         try:
-            log_event("stt_load_start", device="cuda", model=STT_MODEL_SIZE)
-            self.stt_model = WhisperModel(STT_MODEL_SIZE, device="cuda", compute_type="float16")
+            self.stt_model = WhisperModel(
+                STT_MODEL_SIZE, device="cuda", compute_type="float16"
+            )
             self.stt_device = "cuda"
-            log_event("stt_load_success", device="cuda", model=STT_MODEL_SIZE)
-        except Exception as e:
-            log_event("stt_load_failed", device="cuda", model=STT_MODEL_SIZE, error=str(e))
-            log_event("stt_load_start", device="cpu", model=STT_MODEL_SIZE)
-            self.stt_model = WhisperModel(STT_MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=4)
+        except Exception as error:
+            log_event("stt_cuda_failed", error=str(error))
+            self.stt_model = WhisperModel(
+                STT_MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=4
+            )
             self.stt_device = "cpu"
-            log_event("stt_load_success", device="cpu", model=STT_MODEL_SIZE)
 
     def config_from_request(self, request: Request) -> VoiceRequestConfig:
         return VoiceRequestConfig(
-            language=request.headers.get("x-voice-language", self.language),
-            tts_voice=request.headers.get("x-voice-tts-voice", ""),
-            tts_rate=request.headers.get("x-voice-rate", self.tts_rate),
+            language=request.headers.get("x-voice-language", self.language)
+            if request.headers.get("x-voice-language", self.language) in {"id", "en"}
+            else self.language,
+            tts_voice="",
+            tts_rate=self.tts_rate,
             enabled=request.headers.get("x-voice-enabled", "true").lower() != "false",
-            elder_name=request.headers.get("x-elder-name", "").strip(),
-            timezone=request.headers.get("x-elder-timezone", "Asia/Jakarta").strip() or "Asia/Jakarta",
-            context=request.headers.get("x-voice-context", "").strip(),
+            preferred_name=request.headers.get("x-user-name", "").strip()[:80],
+            context=request.headers.get("x-voice-context", "").strip()[:2000],
         )
 
-    # ── Layer 0: STT (Local Faster-Whisper) ───────────────────────────────────
-    async def transcribe(self, audio_bytes: bytes, target_language: Optional[str] = None) -> tuple[str, str, float]:
+    async def transcribe(
+        self, audio_bytes: bytes, target_language: Optional[str] = None
+    ) -> tuple[str, str, float]:
         if self.stt_model is None:
             raise RuntimeError("STT model is not initialized")
-            
         temp_file = self.audio_cache_dir / f"temp_{time.time()}_transcribe.wav"
-        with open(temp_file, "wb") as f:
-            f.write(audio_bytes)
-            
+        with open(temp_file, "wb") as file:
+            file.write(audio_bytes)
         try:
             loop = asyncio.get_running_loop()
+
             def run_whisper():
-                # Pass the explicit target language if provided to avoid detection errors
-                segments, info = self.stt_model.transcribe(str(temp_file), beam_size=3, language=target_language)
+                segments, info = self.stt_model.transcribe(
+                    str(temp_file), beam_size=3, language=target_language
+                )
                 transcript = " ".join([segment.text for segment in segments]).strip()
                 return transcript, info.language, info.language_probability
 
-            transcript, detected_lang, confidence = await loop.run_in_executor(None, run_whisper)
-            
-            if confidence < 0.7:
-                log_event("stt_low_confidence", confidence=round(confidence, 4), detected_language=detected_lang)
-                if detected_lang != "en":
-                    detected_lang = "en"
-                    
-            if detected_lang not in ["id", "en"]:
-                detected_lang = "en"
-                
-            return transcript, detected_lang, confidence
+            transcript, detected_language, confidence = await loop.run_in_executor(
+                None, run_whisper
+            )
+            if detected_language not in ["id", "en"]:
+                detected_language = "id"
+            return transcript, detected_language, confidence
         finally:
             if temp_file.exists():
                 temp_file.unlink()
 
-    # ── Layer 1: Conversational Response (Ollama API) ────────────────────────
-    async def response_for(self, transcript: str, language: str, elder_name: str = "", context: str = "") -> tuple[str, str]:
+    async def ollama_chat(
+        self,
+        system_instruction: str,
+        user_content: str,
+        *,
+        temperature: float,
+        num_predict: int,
+        timeout: float,
+    ) -> str:
+        if not OLLAMA_API_URL:
+            return ""
+        payload = {
+            "model": OLLAMA_MODEL_NAME,
+            "messages": [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_content},
+            ],
+            "options": {"temperature": temperature, "num_predict": num_predict},
+            "keep_alive": -1,
+            "stream": False,
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                OLLAMA_API_URL, json=payload, headers=ollama_headers(), timeout=timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+            return self._normalize_response(data["message"]["content"] or "")
+
+    async def response_for(
+        self,
+        transcript: str,
+        language: str,
+        preferred_name: str = "",
+        context: str = "",
+    ) -> tuple[str, str]:
         text = self._normalize(transcript)
         if not text:
-            return "I'm sorry, I didn't catch that. Could you please repeat slowly?", "fallback"
-            
+            return (
+                "Sorry, I did not catch that. Could you repeat it slowly?",
+                "fallback",
+            )
         if not OLLAMA_API_URL:
-            return self._fallback_response_for(transcript, language), "fallback"
-
+            return self._fallback_response_for(transcript), "fallback"
+        name_instruction = (
+            f"The user's preferred name is {preferred_name}. Use it naturally, not in every sentence. "
+            if preferred_name
+            else ""
+        )
+        context_instruction = f"Relevant app context:\n{context}\n" if context else ""
+        system_instruction = (
+            "You are Happify, a warm AI mental-health companion for teenagers and university students. "
+            f"{name_instruction}{context_instruction}"
+            "You are not a therapist and you must not diagnose. "
+            "Respond in English. "
+            "Use a friendly, non-judgmental, emotionally safe tone. "
+            "Keep the response to 1 or 2 short sentences. "
+            "If the user mentions self-harm, suicide, abuse, panic, or immediate danger, gently encourage contacting trusted people or emergency/professional help."
+        )
         try:
-            name_instruction = f"The elder's preferred name is {elder_name}. Use it naturally, not in every sentence. " if elder_name else ""
-            context_instruction = f"Relevant care context:\n{context}\n" if context else ""
-            system_instruction = (
-                "You are Eldora, a warm voice companion for elderly users. "
-                f"{name_instruction}"
-                f"{context_instruction}"
-                "Speak warmly, clearly, and concisely in English or Indonesian based on the user's language. "
-                "You must respond in EXACTLY 1 or 2 short sentences. Do NOT write more than 2 sentences under any circumstance. "
-                "If there is an emergency, a fall, pain, or a request for help, reassure the user and let them know their caregiver will be notified."
+            content = await self.ollama_chat(
+                system_instruction,
+                transcript,
+                temperature=0.35,
+                num_predict=70,
+                timeout=15.0,
             )
-                
-            payload = {
-                "model": OLLAMA_MODEL_NAME,
-                "messages": [
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": transcript}
-                ],
-                "options": {
-                    "temperature": 0.4,
-                    "num_predict": 50
-                },
-                "keep_alive": -1,
-                "stream": False
-            }
+            if content:
+                return content[:360], "ollama"
+        except Exception as error:
+            log_event(
+                "ollama_response_failed",
+                error=str(error),
+                language=language,
+                model=OLLAMA_MODEL_NAME,
+            )
+        return self._fallback_response_for(transcript), "fallback"
 
-            async with httpx.AsyncClient() as client:
-                response = await client.post(OLLAMA_API_URL, json=payload, headers=ollama_headers(), timeout=15.0)
-                response.raise_for_status()
-                data = response.json()
-                content = self._normalize_response(data["message"]["content"] or "")
-                if content:
-                    return content[:260], "ollama_qwen"
-                    
-        except Exception as e:
-            log_event("ollama_response_failed", error=str(e), language=language, model=OLLAMA_MODEL_NAME)
-            
-        return self._fallback_response_for(transcript, language), "fallback"
-
-    # ── Layer 3: Emotion Metrics (Ollama API) ─────────────────────────
-    async def analyze_emotion(self, transcript: str, language: str) -> EmotionData:
-        if not transcript.strip() or not OLLAMA_API_URL:
-            return EmotionData(state="neutral", confidence=0.0)
-            
+    async def analyze_emotion(self, content: str, language: str) -> EmotionData:
+        if not content.strip():
+            return EmotionData()
+        local_intent = self.analyze_intent(content, language)
+        if not OLLAMA_API_URL:
+            return EmotionData(
+                state="distressed" if local_intent.requires_sos else "neutral",
+                confidence=local_intent.confidence,
+                risk_level="high" if local_intent.requires_referral else "low",
+                requires_referral=local_intent.requires_referral,
+            )
+        prompt = (
+            f'Analyze this mental-health expression: "{content}"\n'
+            "Return JSON only with this exact shape: "
+            '{"state":"calm|happy|neutral|sad|anxious|distressed","confidence":0.0,"risk_level":"low|medium|high|crisis","requires_referral":false}'
+        )
         try:
-            prompt = (
-                f'Analyze the emotional state expressed in this speech transcript: "{transcript}"\n\n'
-                'Respond with a JSON object only (no markdown, no explanation):\n'
-                '{"state": "<calm|happy|sad|anxious|distressed>", "confidence": <0.0-1.0>}'
+            result_text = await self.ollama_chat(
+                "You are a safety-focused mental-health emotion analysis agent. Return strict JSON only.",
+                prompt,
+                temperature=0.1,
+                num_predict=90,
+                timeout=10.0,
             )
-            
-            payload = {
-                "model": OLLAMA_MODEL_NAME,
-                "messages": [
-                    {"role": "system", "content": "You are a professional emotion analysis agent. Respond strictly in JSON format."},
-                    {"role": "user", "content": prompt}
-                ],
-                "options": {
-                    "temperature": 0.1,
-                    "num_predict": 45
-                },
-                "keep_alive": -1,
-                "stream": False
-            }
+            match = re.search(r"\{.*?\}", result_text, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group())
+                return EmotionData(
+                    state=str(parsed.get("state", "neutral")),
+                    confidence=float(parsed.get("confidence", 0.5)),
+                    risk_level=str(parsed.get("risk_level", "low")),
+                    requires_referral=bool(parsed.get("requires_referral", False)),
+                )
+        except Exception as error:
+            log_event(
+                "ollama_emotion_failed",
+                error=str(error),
+                language=language,
+                model=OLLAMA_MODEL_NAME,
+            )
+        return EmotionData(
+            state="distressed" if local_intent.requires_sos else "neutral",
+            confidence=local_intent.confidence,
+            risk_level="high" if local_intent.requires_referral else "low",
+            requires_referral=local_intent.requires_referral,
+        )
 
-            async with httpx.AsyncClient() as client:
-                response = await client.post(OLLAMA_API_URL, json=payload, headers=ollama_headers(), timeout=10.0)
-                response.raise_for_status()
-                data = response.json()
-                result_text = data["message"]["content"].strip()
-                
-                match = re.search(r"\{.*?\}", result_text, re.DOTALL)
-                if match:
-                    data_json = json.loads(match.group())
-                    return EmotionData(
-                        state=str(data_json.get("state", "neutral")),
-                        confidence=float(data_json.get("confidence", 0.5)),
-                    )
-        except Exception as e:
-            log_event("ollama_emotion_failed", error=str(e), language=language, model=OLLAMA_MODEL_NAME)
-            
-        return EmotionData(state="neutral", confidence=0.5)
-
-    # ── Local TTS (Edge-TTS) ──────────────────────────────────────────────────
-    async def generate_audio(self, text: str, cfg: Optional[VoiceRequestConfig] = None, language: str = "id") -> Optional[str]:
-        if cfg and not cfg.enabled:
-            return None
-
-        clean_text = self._clean_for_tts(text)
-        if not clean_text:
-            return None
-            
-        header_voice = cfg.tts_voice if cfg else None
-        configured_default = self.tts_voice or DEFAULT_VOICES.get(language, DEFAULT_VOICES["en"])
-        voice = header_voice or configured_default
-        if not header_voice and language in DEFAULT_VOICES:
-            voice = DEFAULT_VOICES[language]
-            
-        rate = cfg.tts_rate if cfg else self.tts_rate
-        
-        cache_key = f"{voice}_{rate}_{clean_text}"
-        filename = f"tts_{hashlib.md5(cache_key.encode()).hexdigest()[:12]}.mp3"
-        path = self.audio_cache_dir / filename
-        
-        if not path.exists():
-            communicate = edge_tts.Communicate(clean_text, voice, rate=rate)
-            await communicate.save(str(path))
-            
-        return f"/api/audio/{filename}"
-
-    # ── Layer 2: Intent Metrics (local rules) ─────────────────────────────────
     def analyze_intent(self, transcript: str, language: str) -> IntentData:
         text = self._normalize(transcript)
         if not text:
             return IntentData()
-
-        call_family_terms_id = ["panggil anak", "hubungi anak", "telepon anak", "telpon anak", "panggil keluarga", "hubungi keluarga", "telepon keluarga", "telpon keluarga", "panggil caregiver", "hubungi caregiver", "panggil pengasuh", "hubungi pengasuh"]
-        call_family_terms_en = ["call my child", "call my son", "call my daughter", "call my family", "contact my family", "call caregiver", "contact caregiver"]
-        if any(term in text for term in call_family_terms_id + call_family_terms_en):
-            return IntentData(name="call_family", confidence=0.95, notify_caregiver=True, call_family=True)
-
-        if any(word in text for word in ["jatuh", "terpleset", "roboh", "fall", "fell", "fallen"]):
-            return IntentData(name="fall_detected", confidence=0.9, notify_caregiver=True)
-        if any(word in text for word in ["tolong", "bantuan", "darurat", "sakit", "sesak", "nyeri", "help", "emergency", "hurts", "pain", "can't breathe"]):
-            return IntentData(name="help_request", confidence=0.86, notify_caregiver=True)
-        if any(word in text for word in ["minum", "haus", "air", "water", "drink", "thirsty"]):
-            return IntentData(name="water_request", confidence=0.78, notify_caregiver=True)
-        if any(word in text for word in ["obat", "pil", "kapsul", "medicine", "medication", "pill"]):
-            return IntentData(name="medicine_request", confidence=0.82, notify_caregiver=True)
-        if any(word in text for word in ["kesepian", "takut", "sedih", "lonely", "scared", "afraid", "sad"]):
-            return IntentData(name="emotional_support", confidence=0.75, notify_caregiver=False)
+        crisis_terms = [
+            "bunuh diri",
+            "mengakhiri hidup",
+            "mati aja",
+            "self harm",
+            "suicide",
+            "kill myself",
+            "end my life",
+        ]
+        panic_terms = [
+            "panic",
+            "panik",
+            "sesak",
+            "can't breathe",
+            "tidak bisa napas",
+            "cemas banget",
+            "darurat",
+            "tolong",
+        ]
+        loneliness_terms = [
+            "kesepian",
+            "sendirian",
+            "lonely",
+            "alone",
+            "tak ada yang peduli",
+            "nobody cares",
+        ]
+        if any(term in text for term in crisis_terms):
+            return IntentData(
+                name="crisis_risk",
+                confidence=0.98,
+                requires_sos=True,
+                requires_referral=True,
+            )
+        if any(term in text for term in panic_terms):
+            return IntentData(
+                name="panic_or_emergency",
+                confidence=0.88,
+                requires_sos=True,
+                requires_referral=False,
+            )
+        if any(term in text for term in loneliness_terms):
+            return IntentData(
+                name="loneliness_support",
+                confidence=0.76,
+                requires_sos=False,
+                requires_referral=False,
+            )
         return IntentData(name="general", confidence=0.5)
 
-    # ── Layer 4: Reminder Planner (fast local + optional Ollama JSON) ─────────
-    async def plan_reminder(self, transcript: str, language: str, timezone: str) -> ReminderPlan:
-        text = self._normalize(transcript)
-        if not self._looks_like_reminder_request(text):
-            return ReminderPlan()
+    async def generate_audio(
+        self, text: str, cfg: Optional[VoiceRequestConfig] = None, language: str = "id"
+    ) -> Optional[str]:
+        if cfg and not cfg.enabled:
+            return None
+        clean_text = self._clean_for_tts(text)
+        if not clean_text:
+            return None
+        header_voice = cfg.tts_voice if cfg else None
+        voice = (
+            header_voice
+            or self.tts_voice
+            or DEFAULT_VOICES.get(language, DEFAULT_VOICES["id"])
+        )
+        if not header_voice and language in DEFAULT_VOICES:
+            voice = DEFAULT_VOICES[language]
+        rate = cfg.tts_rate if cfg else self.tts_rate
+        cache_key = f"{voice}_{rate}_{clean_text}"
+        filename = f"tts_{hashlib.md5(cache_key.encode()).hexdigest()[:12]}.mp3"
+        path = self.audio_cache_dir / filename
+        if not path.exists():
+            communicate = edge_tts.Communicate(clean_text, voice, rate=rate)
+            await communicate.save(str(path))
+        return f"/api/audio/{filename}"
 
-        local_plan = self._parse_local_reminder(text, timezone)
-        if local_plan.action != "none":
-            return local_plan
-
-        if not OLLAMA_API_URL:
-            return ReminderPlan(
-                action="clarify_reminder",
-                confidence=0.4,
-                clarification_question="Jam berapa saya harus mengingatkan?",
+    async def analyze_journal(
+        self, content: str, language: str
+    ) -> AnalyzeJournalResponse:
+        emotion = await self.analyze_emotion(content, language)
+        if OLLAMA_API_URL:
+            system_instruction = (
+                "You are Happify, a mental-health journaling reflection assistant. "
+                "You are not a therapist and must not diagnose. "
+                "Give a short, warm reflection in English, plus one gentle next step."
             )
-
-        try:
-            prompt = (
-                f'Transcript: "{transcript}"\n'
-                f'Timezone: "{timezone}"\n'
-                f'Current time: "{self._now(timezone).isoformat()}"\n\n'
-                'Extract an elder reminder request. Respond JSON only:\n'
-                '{"action":"none|create_reminder|clarify_reminder", "title":"short title", "message":"reminder message", '
-                '"dueAt":"ISO-8601 datetime or null", "timezone":"timezone", "recurrenceRule":null, '
-                '"confidence":0.0, "clarificationQuestion":"question or null"}'
-            )
-            payload = {
-                "model": OLLAMA_MODEL_NAME,
-                "messages": [
-                    {"role": "system", "content": "You extract reminder commands for elderly care. Respond strictly in JSON."},
-                    {"role": "user", "content": prompt},
-                ],
-                "options": {"temperature": 0.1, "num_predict": 100},
-                "keep_alive": -1,
-                "stream": False,
-            }
-            async with httpx.AsyncClient() as client:
-                response = await client.post(OLLAMA_API_URL, json=payload, headers=ollama_headers(), timeout=3.0)
-                response.raise_for_status()
-                data = response.json()
-                result_text = data["message"]["content"].strip()
-                match = re.search(r"\{.*?\}", result_text, re.DOTALL)
-                if not match:
-                    return ReminderPlan(action="clarify_reminder", confidence=0.4, clarification_question="Bisa ulangi pengingatnya untuk jam berapa?")
-                parsed = json.loads(match.group())
-                action = str(parsed.get("action", "none"))
-                due_at = parsed.get("dueAt") or parsed.get("due_at")
-                return ReminderPlan(
-                    action=action,
-                    title=parsed.get("title"),
-                    message=parsed.get("message"),
-                    due_at=due_at,
-                    dueAt=due_at,
-                    timezone=parsed.get("timezone") or timezone,
-                    recurrence_rule=parsed.get("recurrenceRule"),
-                    recurrenceRule=parsed.get("recurrenceRule"),
-                    confidence=float(parsed.get("confidence", 0.5)),
-                    clarification_question=parsed.get("clarificationQuestion"),
-                    clarificationQuestion=parsed.get("clarificationQuestion"),
+            try:
+                reflection = await self.ollama_chat(
+                    system_instruction,
+                    content,
+                    temperature=0.35,
+                    num_predict=130,
+                    timeout=12.0,
                 )
-        except Exception as e:
-            log_event("ollama_reminder_failed", error=str(e), language=language, model=OLLAMA_MODEL_NAME)
-            return ReminderPlan(action="clarify_reminder", confidence=0.4, clarification_question="Bisa ulangi pengingatnya untuk jam berapa?")
-
-    def _looks_like_reminder_request(self, text: str) -> bool:
-        terms = [
-            "ingatkan", "ingetin", "remind me", "reminder", "jangan lupa", "nanti ingatkan",
-        ]
-        return any(term in text for term in terms)
-
-    def _now(self, timezone: str) -> datetime:
-        try:
-            return datetime.now(ZoneInfo(timezone))
-        except Exception:
-            return datetime.now(ZoneInfo("Asia/Jakarta"))
-
-    def _parse_local_reminder(self, text: str, timezone: str) -> ReminderPlan:
-        now = self._now(timezone)
-        recurrence_rule = None
-        if any(term in text for term in ["setiap hari", "tiap hari", "daily", "every day"]):
-            recurrence_rule = "FREQ=DAILY"
-
-        match = re.search(r"(?:jam|pukul|at)\s*(\d{1,2})(?:[:.](\d{2}))?\s*(pagi|siang|sore|malam|am|pm)?", text)
-        if not match:
-            return ReminderPlan(action="clarify_reminder", confidence=0.55, clarification_question="Jam berapa saya harus mengingatkan?")
-
-        hour = int(match.group(1))
-        minute = int(match.group(2) or "0")
-        period = match.group(3)
-        if period in {"siang", "sore", "malam", "pm"} and hour < 12:
-            hour += 12
-        if period == "pagi" and hour == 12:
-            hour = 0
-        if not period and hour <= 7 and "nanti" in text and now.hour >= hour:
-            hour += 12
-        if hour > 23 or minute > 59:
-            return ReminderPlan(action="clarify_reminder", confidence=0.45, clarification_question="Jamnya belum jelas. Bisa sebutkan ulang waktunya?")
-
-        due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if any(term in text for term in ["besok", "tomorrow"]):
-            due += timedelta(days=1)
-        elif due <= now and not recurrence_rule:
-            due += timedelta(days=1)
-
-        message = self._reminder_message_from_text(text)
-        return ReminderPlan(
-            action="create_reminder",
-            title=message[:80],
-            message=message,
-            due_at=due.isoformat(),
-            dueAt=due.isoformat(),
-            timezone=timezone,
-            recurrence_rule=recurrence_rule,
-            recurrenceRule=recurrence_rule,
-            confidence=0.82,
+            except Exception as error:
+                log_event("ollama_journal_failed", error=str(error))
+                reflection = "It sounds like today meant a lot to you. Thank you for writing about it honestly."
+        else:
+            reflection = "It sounds like today meant a lot to you. Thank you for writing about it honestly."
+        suggested_action = (
+            "Open SOS and contact someone you trust now."
+            if emotion.risk_level in {"high", "crisis"}
+            else "Take one slow breath, then note one small thing you can do next."
+        )
+        return AnalyzeJournalResponse(
+            reflection=reflection[:600],
+            emotion=emotion,
+            suggested_action=suggested_action,
         )
 
-    def _reminder_message_from_text(self, text: str) -> str:
-        cleaned = re.sub(r"\b(eldora|tolong|please|ya)\b", " ", text)
-        cleaned = re.sub(r"\b(ingatkan|ingetin|remind me|reminder|nanti|besok|setiap hari|tiap hari|daily|every day)\b", " ", cleaned)
-        cleaned = re.sub(r"(?:jam|pukul|at)\s*\d{1,2}(?:[:.]\d{2})?\s*(?:pagi|siang|sore|malam|am|pm)?", " ", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
-        return cleaned.capitalize() if cleaned else "Pengingat dari DoraBot"
-
-    # ── Fallbacks & Helpers ───────────────────────────────────────────────────
-    def _fallback_response_for(self, transcript: str, language: str) -> str:
+    def _fallback_response_for(self, transcript: str) -> str:
         text = self._normalize(transcript)
         if not text:
-            return "I'm sorry, I didn't catch that. Could you please repeat slowly?"
-
-        if any(term in text for term in ["call my child", "call my son", "call my daughter", "call my family", "contact my family", "call caregiver", "contact caregiver"]):
-            return "Okay, I will notify your family right away. Please stay calm."
-        if any(word in text for word in ["fall", "fell", "fallen"]):
-            return "I am contacting your caregiver right now. Please stay calm and try not to move too much."
-        if any(word in text for word in ["help", "emergency", "hurts", "pain", "can't breathe"]):
-            return "I will notify your caregiver immediately. Please stay calm, help is on the way."
-        if any(word in text for word in ["water", "drink", "thirsty"]):
-            return "Got it, I will let your caregiver know that you need some water."
-        if any(word in text for word in ["medicine", "medication", "pill"]):
-            return "Got it, I will pass your medicine request to your caregiver."
-        if any(word in text for word in ["lonely", "scared", "afraid", "sad"]):
-            return "I am right here with you. Take a slow breath, you are not alone."
-        return "I hear you. I will help pass your needs to your caregiver if needed."
+            return "I did not catch that. Could you repeat it slowly?"
+        if any(
+            term in text
+            for term in [
+                "bunuh diri",
+                "mengakhiri hidup",
+                "suicide",
+                "kill myself",
+                "end my life",
+            ]
+        ):
+            return "I am concerned about your safety. Contact someone you trust or emergency services now; you do not have to face this alone."
+        if any(term in text for term in ["panik", "panic", "sesak", "can't breathe"]):
+            return "Let us slow down together. Breathe in for four counts, pause, then breathe out gently."
+        if any(term in text for term in ["kesepian", "lonely", "sendirian", "alone"]):
+            return "I am here with you. This feeling is heavy, but you do not have to face it alone."
+        return "I hear you. We can take this one small step at a time."
 
     def _normalize(self, text: str) -> str:
         return re.sub(r"\s+", " ", text.lower()).strip()
@@ -514,41 +472,72 @@ class VoiceProcessor:
     def _clean_for_tts(self, text: str) -> str:
         return re.sub(r"[^\w\s.,!?;:'\-()À-ɏ]", "", text).strip()
 
-# ==========================================
-# FASTAPI GATEWAY ENGINE
-# ==========================================
-processor = VoiceProcessor()
-app = FastAPI(title="Eldora Voice Service (Ollama Gateway)", version="2.0.0")
 
+processor = VoiceProcessor()
+turn_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TURNS)
+app = FastAPI(title="Happify AI Service", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[],
+    allow_credentials=False,
+    allow_methods=[],
+    allow_headers=[],
 )
 
 
 @app.middleware("http")
 async def request_logger(request: Request, call_next):
+    if request.url.path.startswith("/api/"):
+        authorization = request.headers.get("authorization", "")
+        provided_token = (
+            authorization[7:] if authorization.startswith("Bearer ") else ""
+        )
+        if not AI_SERVICE_TOKEN or not secrets.compare_digest(
+            provided_token, AI_SERVICE_TOKEN
+        ):
+            return Response(
+                content='{"detail":"Unauthorized"}',
+                status_code=401,
+                media_type="application/json",
+            )
     start = time.perf_counter()
     try:
         response = await call_next(request)
     except Exception as error:
-        duration_ms = round((time.perf_counter() - start) * 1000, 2)
-        log_event("request_failed", method=request.method, path=request.url.path, duration_ms=duration_ms, error=str(error))
+        log_event(
+            "request_failed",
+            method=request.method,
+            path=request.url.path,
+            duration_ms=round((time.perf_counter() - start) * 1000, 2),
+            error=str(error),
+        )
         raise
-
-    duration_ms = round((time.perf_counter() - start) * 1000, 2)
-    log_event("request_completed", method=request.method, path=request.url.path, status=response.status_code, duration_ms=duration_ms)
+    log_event(
+        "request_completed",
+        method=request.method,
+        path=request.url.path,
+        status=response.status_code,
+        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+    )
     return response
 
 
 @app.on_event("startup")
 async def startup() -> None:
-    log_event("startup", stt_model=STT_MODEL_SIZE, stt_device=STT_DEVICE, ollama_configured=bool(OLLAMA_API_URL), ollama_api_key_configured=bool(OLLAMA_API_KEY))
+    log_event(
+        "startup",
+        stt_model=STT_MODEL_SIZE,
+        stt_device=STT_DEVICE,
+        ollama_configured=bool(OLLAMA_API_URL),
+    )
     processor.load()
-    log_event("startup_ready", active_stt_device=processor.stt_device, default_language=processor.language, default_voice=processor.tts_voice)
+    log_event(
+        "startup_ready",
+        active_stt_device=processor.stt_device,
+        default_language=processor.language,
+        default_voice=processor.tts_voice,
+    )
+
 
 @app.get("/health")
 async def health() -> dict:
@@ -556,120 +545,99 @@ async def health() -> dict:
     if OLLAMA_API_URL:
         try:
             async with httpx.AsyncClient() as client:
-                res = await client.get(OLLAMA_API_URL.split("/api")[0] + "/", headers=ollama_headers(), timeout=1.0)
-                if res.status_code == 200:
-                    status = "healthy"
-                else:
-                    status = "unhealthy_ollama_not_responding"
+                response = await client.get(
+                    OLLAMA_API_URL.split("/api")[0] + "/",
+                    headers=ollama_headers(),
+                    timeout=1.0,
+                )
+                status = (
+                    "healthy"
+                    if response.status_code == 200
+                    else "unhealthy_ollama_not_responding"
+                )
         except Exception:
             status = "ollama_not_reachable"
-        
     return {
-        "status": "healthy" if processor.stt_model is not None and status == "healthy" else "degraded",
+        "status": "healthy" if processor.stt_model is not None else "degraded",
         "ollama_status": status,
-        "stt_model": f"Faster-Whisper (Local {processor.stt_device.upper()})",
-        "llm_model": f"Ollama ({OLLAMA_MODEL_NAME})",
-        "language": processor.language,
+        "stt_model": f"Faster-Whisper ({processor.stt_device})",
+        "llm_model": OLLAMA_MODEL_NAME,
     }
+
 
 @app.post("/api/process-audio", response_model=ProcessAudioResponse)
 async def process_audio(request: Request) -> ProcessAudioResponse:
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
+    if content_type not in ALLOWED_AUDIO_TYPES:
+        raise HTTPException(status_code=415, detail="Unsupported audio type")
+    content_length = int(request.headers.get("content-length", "0") or 0)
+    if content_length > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio stream is too large")
     cfg = processor.config_from_request(request)
     start = time.perf_counter()
     audio_bytes = await request.body()
     audio_ms = round((time.perf_counter() - start) * 1000, 2)
-
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio stream is too large")
     if len(audio_bytes) < 1000:
-        log_event("voice_rejected", reason="audio_too_short", bytes=len(audio_bytes), language=cfg.language)
         raise HTTPException(status_code=400, detail="Audio stream is too short")
-
-    log_event("voice_processing_started", bytes=len(audio_bytes), language=cfg.language, voice=cfg.tts_voice or processor.tts_voice, rate=cfg.tts_rate, voice_enabled=cfg.enabled)
-
     try:
-        # Layer 0: STT — must complete before response generation
+        await turn_semaphore.acquire()
         stt_start = time.perf_counter()
-        transcript, language, confidence = await processor.transcribe(audio_bytes, cfg.language)
+        transcript, language, confidence = await processor.transcribe(
+            audio_bytes, cfg.language
+        )
         stt_ms = round((time.perf_counter() - stt_start) * 1000, 2)
-
-        # Layer 1 + Layer 3 + Layer 4 run after transcript; Layer 2 stays local/sync
         intent = processor.analyze_intent(transcript, language)
         ai_start = time.perf_counter()
 
         async def timed_response():
-            start_at = time.perf_counter()
-            result = await processor.response_for(transcript, language, cfg.elder_name, cfg.context)
-            return result, round((time.perf_counter() - start_at) * 1000, 2)
+            started = time.perf_counter()
+            result = await processor.response_for(
+                transcript, language, cfg.preferred_name, cfg.context
+            )
+            return result, round((time.perf_counter() - started) * 1000, 2)
 
         async def timed_emotion():
-            start_at = time.perf_counter()
+            started = time.perf_counter()
             result = await processor.analyze_emotion(transcript, language)
-            return result, round((time.perf_counter() - start_at) * 1000, 2)
+            return result, round((time.perf_counter() - started) * 1000, 2)
 
-        async def timed_reminder():
-            start_at = time.perf_counter()
-            result = await processor.plan_reminder(transcript, language, cfg.timezone)
-            return result, round((time.perf_counter() - start_at) * 1000, 2)
-
-        ((message, response_source), response_ms), (emotion, emotion_ms), (reminder, reminder_ms) = await asyncio.gather(
-            timed_response(),
-            timed_emotion(),
-            timed_reminder(),
-        )
+        (
+            ((message, response_source), response_ms),
+            (emotion, emotion_ms),
+        ) = await asyncio.gather(timed_response(), timed_emotion())
         ai_ms = round((time.perf_counter() - ai_start) * 1000, 2)
-
-        if intent.notify_caregiver:
-            reminder = ReminderPlan()
-        elif reminder.action == "clarify_reminder" and reminder.clarification_question:
-            message = reminder.clarification_question
-            response_source = "reminder_planner"
-        elif reminder.action == "create_reminder" and reminder.due_at:
-            name_prefix = f", {cfg.elder_name}" if cfg.elder_name else ""
-            due_text = format_datetime(reminder.due_at)
-            message = f"Baik{name_prefix}, saya catat ya. Nanti jam {due_text}, saya akan mengingatkan tentang {reminder.message or reminder.title or 'pengingat ini'}."
-            response_source = "reminder_planner"
-
-        # TTS Synthesis — use per-request settings and pass language for auto voice packs
+        if intent.requires_referral and emotion.risk_level not in {"high", "crisis"}:
+            emotion.risk_level = "high"
+            emotion.requires_referral = True
+        if emotion.risk_level == "crisis" or intent.name == "crisis_risk":
+            message = "I am concerned about your safety. Contact someone you trust or emergency services now; you do not have to face this alone."
+            response_source = "safety_policy"
+        elif emotion.risk_level == "high":
+            message = "This sounds very difficult. Contact someone you trust today, and use professional or SOS support if you feel unsafe."
+            response_source = "safety_policy"
         tts_start = time.perf_counter()
         audio_url = await processor.generate_audio(message, cfg, language)
         tts_ms = round((time.perf_counter() - tts_start) * 1000, 2)
-
     except Exception as error:
-        log_event("voice_processing_failed", error=str(error), language=cfg.language, voice=cfg.tts_voice or processor.tts_voice)
-        raise HTTPException(status_code=500, detail=str(error)) from error
-
+        log_event(
+            "voice_processing_failed", error=type(error).__name__, language=cfg.language
+        )
+        raise HTTPException(
+            status_code=500, detail="Voice processing failed"
+        ) from error
+    finally:
+        turn_semaphore.release()
     total_ms = round((time.perf_counter() - start) * 1000, 2)
     latency = LatencyBreakdown(
         audio_ms=audio_ms,
         stt_ms=stt_ms,
         response_ms=response_ms,
         emotion_ms=emotion_ms,
-        reminder_ms=reminder_ms,
         ai_ms=ai_ms,
         tts_ms=tts_ms,
         total_ms=total_ms,
-    )
-    log_event(
-        "voice_processing_completed",
-        stt_ms=stt_ms,
-        response_ms=response_ms,
-        emotion_ms=emotion_ms,
-        reminder_ms=reminder_ms,
-        ai_ms=ai_ms,
-        tts_ms=tts_ms,
-        total_ms=total_ms,
-        response_source=response_source,
-        emotion=emotion.state,
-        emotion_confidence=emotion.confidence,
-        intent=intent.name,
-        intent_confidence=intent.confidence,
-        reminder_action=reminder.action,
-        reminder_confidence=reminder.confidence,
-        notify_caregiver=intent.notify_caregiver,
-        call_family=intent.call_family,
-        language=language,
-        confidence=confidence,
-        voice=cfg.tts_voice or processor.tts_voice,
-        audio_cached=bool(audio_url),
     )
     return ProcessAudioResponse(
         text=transcript,
@@ -682,26 +650,40 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
         responseSource=response_source,
         emotion=emotion,
         intent=intent,
-        reminder=reminder,
         latency_ms=total_ms,
         latency=latency,
     )
 
+
+@app.post("/api/analyze-journal", response_model=AnalyzeJournalResponse)
+async def analyze_journal(body: AnalyzeJournalRequest) -> AnalyzeJournalResponse:
+    if not body.content.strip():
+        raise HTTPException(status_code=400, detail="Journal content is required")
+    return await processor.analyze_journal(body.content, body.language)
+
+
 @app.post("/api/test-tts")
 async def test_tts(request: Request, body: TestTTSRequest) -> dict:
     cfg = processor.config_from_request(request)
-    text = body.text or "Hello! I am Eldora, your voice companion. I am here whenever you need me."
+    text = (
+        body.text or "Hello, I am Happify. I am here to support you, one step at a time."
+    )
     audio_url = await processor.generate_audio(text, cfg, cfg.language)
-    log_event("tts_preview_generated", language=cfg.language, voice=cfg.tts_voice or processor.tts_voice, rate=cfg.tts_rate, audio_cached=bool(audio_url))
     return {"audio_url": audio_url, "audioUrl": audio_url, "text": text}
+
 
 @app.get("/api/audio/{filename}")
 def get_audio(filename: str) -> FileResponse:
-    path = processor.audio_cache_dir / filename
-    if not path.exists() or not path.is_file():
+    if not re.fullmatch(r"tts_[a-f0-9]{12}\.mp3", filename):
+        raise HTTPException(status_code=404, detail="Audio not found")
+    cache_root = processor.audio_cache_dir.resolve()
+    path = (cache_root / filename).resolve()
+    if path.parent != cache_root or not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Audio not found")
     return FileResponse(str(path), media_type="audio/mpeg", filename=filename)
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

@@ -1,3 +1,6 @@
+# Local environment
+.env
+
 # Virtual Environment
 env_dorabot/
 
