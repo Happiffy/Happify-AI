@@ -72,6 +72,12 @@ class EmotionData(BaseModel):
     state: str = "neutral"
     confidence: float = 0.0
 
+class IntentData(BaseModel):
+    name: str = "general"
+    confidence: float = 0.0
+    notify_caregiver: bool = False
+    call_family: bool = False
+
 class LatencyBreakdown(BaseModel):
     audio_ms: float
     stt_ms: float
@@ -89,6 +95,7 @@ class ProcessAudioResponse(BaseModel):
     response_source: str
     responseSource: str
     emotion: EmotionData
+    intent: IntentData
     latency_ms: float
     latency: LatencyBreakdown
 
@@ -100,8 +107,8 @@ class TestTTSRequest(BaseModel):
 # ==========================================
 class VoiceProcessor:
     def __init__(self) -> None:
-        self.language = os.getenv("VOICE_LANGUAGE", "id")
-        self.tts_voice = os.getenv("VOICE_TTS_VOICE", "id-ID-GadisNeural")
+        self.language = os.getenv("VOICE_LANGUAGE", "en")
+        self.tts_voice = os.getenv("VOICE_TTS_VOICE", "en-US-JennyNeural")
         self.tts_rate = os.getenv("VOICE_TTS_RATE", "-10%")
         self.audio_cache_dir = Path(os.getenv("VOICE_AUDIO_CACHE_DIR", "./audio_cache"))
         self.audio_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -180,28 +187,18 @@ class VoiceProcessor:
     async def response_for(self, transcript: str, language: str) -> tuple[str, str]:
         text = self._normalize(transcript)
         if not text:
-            fallback = "Maaf, saya tidak mendengar dengan jelas. Bisa diulangi?" if language == "id" else "I'm sorry, I didn't catch that. Could you please repeat slowly?"
-            return fallback, "fallback"
+            return "I'm sorry, I didn't catch that. Could you please repeat slowly?", "fallback"
             
         if not OLLAMA_API_URL:
             return self._fallback_response_for(transcript, language), "fallback"
 
         try:
-            # Set system prompts based on language
-            if language == "id":
-                system_instruction = (
-                    "You are Eldora, a warm voice companion for elderly users. "
-                    "Speak warmly, clearly, and concisely in Bahasa Indonesia. "
-                    "You must respond in EXACTLY 1 or 2 short sentences. Do NOT write more than 2 sentences under any circumstance. "
-                    "If there is an emergency, a fall, pain, or a request for help, reassure the user and let them know their caregiver will be notified."
-                )
-            else:
-                system_instruction = (
-                    "You are Eldora, a warm voice companion for elderly users. "
-                    "Speak warmly, clearly, and concisely in English. "
-                    "You must respond in EXACTLY 1 or 2 short sentences. Do NOT write more than 2 sentences under any circumstance. "
-                    "If there is an emergency, a fall, pain, or a request for help, reassure the user and let them know their caregiver will be notified."
-                )
+            system_instruction = (
+                "You are Eldora, a warm voice companion for elderly users. "
+                "Speak warmly, clearly, and concisely in English. "
+                "You must respond in EXACTLY 1 or 2 short sentences. Do NOT write more than 2 sentences under any circumstance. "
+                "If there is an emergency, a fall, pain, or a request for help, reassure the user and let them know their caregiver will be notified."
+            )
                 
             payload = {
                 "model": OLLAMA_MODEL_NAME,
@@ -301,36 +298,48 @@ class VoiceProcessor:
             
         return f"/api/audio/{filename}"
 
+    # ── Layer 2: Intent Metrics (local rules) ─────────────────────────────────
+    def analyze_intent(self, transcript: str, language: str) -> IntentData:
+        text = self._normalize(transcript)
+        if not text:
+            return IntentData()
+
+        call_family_terms_id = ["panggil anak", "hubungi anak", "telepon anak", "telpon anak", "panggil keluarga", "hubungi keluarga", "telepon keluarga", "telpon keluarga", "panggil caregiver", "hubungi caregiver", "panggil pengasuh", "hubungi pengasuh"]
+        call_family_terms_en = ["call my child", "call my son", "call my daughter", "call my family", "contact my family", "call caregiver", "contact caregiver"]
+        if any(term in text for term in call_family_terms_id + call_family_terms_en):
+            return IntentData(name="call_family", confidence=0.95, notify_caregiver=True, call_family=True)
+
+        if any(word in text for word in ["jatuh", "terpleset", "roboh", "fall", "fell", "fallen"]):
+            return IntentData(name="fall_detected", confidence=0.9, notify_caregiver=True)
+        if any(word in text for word in ["tolong", "bantuan", "darurat", "sakit", "sesak", "nyeri", "help", "emergency", "hurts", "pain", "can't breathe"]):
+            return IntentData(name="help_request", confidence=0.86, notify_caregiver=True)
+        if any(word in text for word in ["minum", "haus", "air", "water", "drink", "thirsty"]):
+            return IntentData(name="water_request", confidence=0.78, notify_caregiver=True)
+        if any(word in text for word in ["obat", "pil", "kapsul", "medicine", "medication", "pill"]):
+            return IntentData(name="medicine_request", confidence=0.82, notify_caregiver=True)
+        if any(word in text for word in ["kesepian", "takut", "sedih", "lonely", "scared", "afraid", "sad"]):
+            return IntentData(name="emotional_support", confidence=0.75, notify_caregiver=False)
+        return IntentData(name="general", confidence=0.5)
+
     # ── Fallbacks & Helpers ───────────────────────────────────────────────────
     def _fallback_response_for(self, transcript: str, language: str) -> str:
         text = self._normalize(transcript)
         if not text:
-            return "Maaf, saya tidak mendengar dengan jelas. Bisa diulangi?" if language == "id" else "I'm sorry, I didn't catch that. Could you please repeat slowly?"
-            
-        if language == "id":
-            if any(word in text for word in ["jatuh", "terpleset", "roboh"]):
-                return "Saya akan segera menghubungi pengasuh Anda. Harap tetap tenang dan jangan banyak bergerak."
-            if any(word in text for word in ["tolong", "bantuan", "sakit", "sesak", "nyeri"]):
-                return "Saya akan segera memberitahu pengasuh Anda. Harap tetap tenang, bantuan sedang dikirim."
-            if any(word in text for word in ["minum", "haus", "air"]):
-                return "Baik, saya akan memberitahu pengasuh Anda bahwa Anda memerlukan air minum."
-            if any(word in text for word in ["obat", "pil", "kapsul"]):
-                return "Baik, saya akan menyampaikan permintaan obat Anda kepada pengasuh."
-            if any(word in text for word in ["kesepian", "takut", "sedih"]):
-                return "Saya di sini menemani Anda. Tarik napas perlahan, Anda tidak sendirian."
-            return "Saya mendengar Anda. Saya akan meneruskan kebutuhan Anda kepada pengasuh jika diperlukan."
-        else:
-            if any(word in text for word in ["fall", "fell", "fallen"]):
-                return "I am contacting your caregiver right now. Please stay calm and try not to move too much."
-            if any(word in text for word in ["help", "emergency", "hurts", "pain", "can't breathe"]):
-                return "I will notify your caregiver immediately. Please stay calm, help is on the way."
-            if any(word in text for word in ["water", "drink", "thirsty"]):
-                return "Got it, I will let your caregiver know that you need some water."
-            if any(word in text for word in ["medicine", "medication", "pill"]):
-                return "Got it, I will pass your medicine request to your caregiver."
-            if any(word in text for word in ["lonely", "scared", "afraid", "sad"]):
-                return "I am right here with you. Take a slow breath, you are not alone."
-            return "I hear you. I will help pass your needs to your caregiver if needed."
+            return "I'm sorry, I didn't catch that. Could you please repeat slowly?"
+
+        if any(term in text for term in ["call my child", "call my son", "call my daughter", "call my family", "contact my family", "call caregiver", "contact caregiver"]):
+            return "Okay, I will notify your family right away. Please stay calm."
+        if any(word in text for word in ["fall", "fell", "fallen"]):
+            return "I am contacting your caregiver right now. Please stay calm and try not to move too much."
+        if any(word in text for word in ["help", "emergency", "hurts", "pain", "can't breathe"]):
+            return "I will notify your caregiver immediately. Please stay calm, help is on the way."
+        if any(word in text for word in ["water", "drink", "thirsty"]):
+            return "Got it, I will let your caregiver know that you need some water."
+        if any(word in text for word in ["medicine", "medication", "pill"]):
+            return "Got it, I will pass your medicine request to your caregiver."
+        if any(word in text for word in ["lonely", "scared", "afraid", "sad"]):
+            return "I am right here with you. Take a slow breath, you are not alone."
+        return "I hear you. I will help pass your needs to your caregiver if needed."
 
     def _normalize(self, text: str) -> str:
         return re.sub(r"\s+", " ", text.lower()).strip()
@@ -418,7 +427,8 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
         transcript, language, confidence = await processor.transcribe(audio_bytes, cfg.language)
         stt_ms = round((time.perf_counter() - stt_start) * 1000, 2)
 
-        # Layer 1 + Layer 3 run in parallel
+        # Layer 1 + Layer 2 + Layer 3 run after transcript
+        intent = processor.analyze_intent(transcript, language)
         ai_start = time.perf_counter()
         (message, response_source), emotion = await asyncio.gather(
             processor.response_for(transcript, language),
@@ -452,6 +462,10 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
         response_source=response_source,
         emotion=emotion.state,
         emotion_confidence=emotion.confidence,
+        intent=intent.name,
+        intent_confidence=intent.confidence,
+        notify_caregiver=intent.notify_caregiver,
+        call_family=intent.call_family,
         language=language,
         confidence=confidence,
         voice=cfg.tts_voice or processor.tts_voice,
@@ -467,6 +481,7 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
         response_source=response_source,
         responseSource=response_source,
         emotion=emotion,
+        intent=intent,
         latency_ms=total_ms,
         latency=latency,
     )

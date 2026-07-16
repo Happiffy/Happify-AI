@@ -15,20 +15,22 @@ This repository hosts the **Eldora Voice Gateway** (built with FastAPI). It orch
 [🎙️ Senior Voice Input] ---------> |  1. Faster-Whisper STT (CPU) |
                                   |             |                |
                                   |   (Parallel Execution)       |
-                                  |    /                  \      |
-                                  |  2. LLM (Ollama)   3. Emotion|
-                                  |    (Local GPU)      (Local)  |
+|    /        |         \      |
+|  2. LLM  3. Intent  4. Emotion|
+|  Ollama   Rules      Ollama  |
+
                                   |    \                  /      |
                                   |             |                |
 [🔊 Paced Speech Output] <-------- |  4. Edge-TTS Audio Cache     |
                                   +------------------------------+
 ```
 
-1. **Layer 0: Audio STT (Local CPU)**: Dynamic English/Indonesian auto-transcription using a local, multi-threaded `Faster-Whisper` model (optimized for CPU with 4 execution threads).
-2. **Layer 1: Conversational Response (Local GPU via Ollama)**: Empathic response generation powered by Qwen2.5 (configured for `qwen2.5:1.5b` or your fine-tuned `eldora-bot` model) offloaded to the local Ollama Windows daemon to utilize the GPU (e.g., NVIDIA GeForce RTX 3050).
-3. **Layer 3: Emotion Metrics (Local GPU via Ollama)**: Unsupervised sentiment analysis determining the senior's emotional state (e.g., *calm, happy, sad, anxious, distressed*) run in parallel with response generation.
-4. **TTS Speech Synthesis (Local Client)**: Natural-pacing `edge-tts` utilizing dynamic voice packs (warm Javanese-Indonesian female voice `"id-ID-GadisNeural"` or English `"en-US-JennyNeural"`) with speech rates slowed by **10%** for clear senior comprehension.
-5. **Telemetry Logs**: Engagement tracking metrics written asynchronously to a local JSON log file.
+1. **Layer 0: Audio STT (Local CPU)**: English-first transcription using a local, multi-threaded `Faster-Whisper` model.
+2. **Layer 1: Conversational Response (Ollama)**: Empathic English response generation powered by Qwen2.5 (`qwen2.5:1.5b`) or your tuned Eldora model.
+3. **Layer 2: Intent Metrics (Rules)**: Detects safety and care intents such as `call_family`, `fall_detected`, `help_request`, `water_request`, and `medicine_request`.
+4. **Layer 3: Emotion Metrics (Ollama)**: Emotion analysis returning *calm, happy, sad, anxious,* or *distressed* in parallel with response generation.
+5. **TTS Speech Synthesis**: Natural-pacing `edge-tts` with dynamic English voice packs, defaulting to `"en-US-JennyNeural"`.
+6. **Telemetry Logs**: Structured maintenance logs for latency, source, emotion, intent, and audio generation.
 
 ---
 
@@ -92,8 +94,8 @@ Required / recommended environment variables:
 PORT=8000
 STT_MODEL_SIZE=base
 STT_DEVICE=cpu
-VOICE_LANGUAGE=id
-VOICE_TTS_VOICE=id-ID-GadisNeural
+VOICE_LANGUAGE=en
+VOICE_TTS_VOICE=en-US-JennyNeural
 VOICE_TTS_RATE=-10%
 VOICE_AUDIO_CACHE_DIR=/app/audio_cache
 OLLAMA_API_URL=https://your-ollama-service.example.com/api/chat

@@ -14,8 +14,8 @@ services:
       - ./.hf_cache:/app/.hf_cache
     environment:
       - OLLAMA_API_URL=http://host.docker.internal:11434/api/chat
-      - VOICE_LANGUAGE=id
-      - VOICE_TTS_VOICE=id-ID-GadisNeural
+      - VOICE_LANGUAGE=en
+      - VOICE_TTS_VOICE=en-US-JennyNeural
       - VOICE_TTS_RATE=-10%
     extra_hosts:
       # Allows the container to communicate with Ollama running on the host machine
