@@ -16,7 +16,7 @@
 
 **The voice AI service for the ELDORA ecosystem — a four-layer pipeline that takes raw audio from DoraBot, transcribes it with Faster-Whisper, generates an empathic response via Ollama, classifies safety intents with local rules, analyzes emotion via Ollama, synthesizes speech with Edge-TTS, and returns a cached audio URL with full latency telemetry.**
 
-[🌐 ELDORA Ecosystem](https://github.com/eldora-bm) · [☁️ Backend](https://github.com/eldora-bm/eldora-backend) · [🤖 DoraBot](https://github.com/eldora-bm/dorabot) · [📱 Mobile App](https://github.com/eldora-bm/eldora-mobile)
+[🌐 ELDORA Ecosystem](https://github.com/Eldoraaa) · [☁️ Backend](https://github.com/Eldoraaa/eldora-backend) · [🤖 DoraBot](https://github.com/Eldoraaa/dorabot) · [📱 Mobile App](https://github.com/Eldoraaa/eldora-mobile)
 
 </div>
 
@@ -285,7 +285,7 @@ VOICE_AUDIO_CACHE_DIR=./audio_cache
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/eldora-bm/eldora-ai-pipeline.git
+git clone https://github.com/Eldoraaa/eldora-ai-pipeline.git
 cd eldora-ai-pipeline
 
 # 2. Create and activate a virtual environment
