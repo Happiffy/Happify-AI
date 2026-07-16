@@ -97,11 +97,13 @@ VOICE_TTS_VOICE=id-ID-GadisNeural
 VOICE_TTS_RATE=-10%
 VOICE_AUDIO_CACHE_DIR=/app/audio_cache
 OLLAMA_API_URL=https://your-ollama-service.example.com/api/chat
+OLLAMA_API_KEY=
 OLLAMA_MODEL_NAME=qwen2.5:1.5b
 ```
 
 Notes:
-- `OLLAMA_API_URL` must point to a reachable hosted Ollama/OpenAI-compatible gateway for AI responses on Railway.
+- `OLLAMA_API_URL` must point to a reachable hosted Ollama-compatible gateway for AI responses on Railway.
+- Set `OLLAMA_API_KEY` when the Ollama gateway requires bearer-token auth.
 - If `OLLAMA_API_URL` is empty/unreachable, the service still runs with local STT + fallback responses + TTS.
 - Backend should point to this Railway service:
 ```env

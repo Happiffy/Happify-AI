@@ -37,6 +37,7 @@ from pydantic import BaseModel
 STT_MODEL_SIZE = os.getenv("STT_MODEL_SIZE", "base")
 STT_DEVICE = os.getenv("STT_DEVICE", "auto").lower()
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "").strip()
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
 OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "qwen2.5:1.5b")
 DEFAULT_VOICES = {
     "id": "id-ID-GadisNeural",
@@ -50,6 +51,12 @@ logger = logging.getLogger("eldora.ai")
 def log_event(event: str, **fields) -> None:
     payload = {"event": event, **fields}
     logger.info(json.dumps(payload, default=str, ensure_ascii=False))
+
+
+def ollama_headers() -> dict[str, str]:
+    if not OLLAMA_API_KEY:
+        return {}
+    return {"Authorization": f"Bearer {OLLAMA_API_KEY}"}
 
 # ==========================================
 # GATEWAY RESPONSE MODELS
@@ -211,7 +218,7 @@ class VoiceProcessor:
             }
 
             async with httpx.AsyncClient() as client:
-                response = await client.post(OLLAMA_API_URL, json=payload, timeout=15.0)
+                response = await client.post(OLLAMA_API_URL, json=payload, headers=ollama_headers(), timeout=15.0)
                 response.raise_for_status()
                 data = response.json()
                 content = self._normalize_response(data["message"]["content"] or "")
@@ -250,7 +257,7 @@ class VoiceProcessor:
             }
 
             async with httpx.AsyncClient() as client:
-                response = await client.post(OLLAMA_API_URL, json=payload, timeout=10.0)
+                response = await client.post(OLLAMA_API_URL, json=payload, headers=ollama_headers(), timeout=10.0)
                 response.raise_for_status()
                 data = response.json()
                 result_text = data["message"]["content"].strip()
@@ -366,7 +373,7 @@ async def request_logger(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup() -> None:
-    log_event("startup", stt_model=STT_MODEL_SIZE, stt_device=STT_DEVICE, ollama_configured=bool(OLLAMA_API_URL))
+    log_event("startup", stt_model=STT_MODEL_SIZE, stt_device=STT_DEVICE, ollama_configured=bool(OLLAMA_API_URL), ollama_api_key_configured=bool(OLLAMA_API_KEY))
     processor.load()
     log_event("startup_ready", active_stt_device=processor.stt_device, default_language=processor.language, default_voice=processor.tts_voice)
 
@@ -376,7 +383,7 @@ async def health() -> dict:
     if OLLAMA_API_URL:
         try:
             async with httpx.AsyncClient() as client:
-                res = await client.get(OLLAMA_API_URL.split("/api")[0] + "/", timeout=1.0)
+                res = await client.get(OLLAMA_API_URL.split("/api")[0] + "/", headers=ollama_headers(), timeout=1.0)
                 if res.status_code == 200:
                     status = "healthy"
                 else:
