@@ -5,9 +5,11 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 # Add NVIDIA library paths to DLL search path and system PATH for CUDA 12 on Windows
 import site
@@ -58,6 +60,16 @@ def ollama_headers() -> dict[str, str]:
         return {}
     return {"Authorization": f"Bearer {OLLAMA_API_KEY}"}
 
+
+def format_datetime(value: Optional[str]) -> str:
+    if not value:
+        return "waktu yang diminta"
+    try:
+        parsed = datetime.fromisoformat(value)
+        return parsed.strftime("%H:%M")
+    except Exception:
+        return value
+
 # ==========================================
 # GATEWAY RESPONSE MODELS
 # ==========================================
@@ -67,6 +79,9 @@ class VoiceRequestConfig:
     tts_voice: str
     tts_rate: str
     enabled: bool
+    elder_name: str
+    timezone: str
+    context: str
 
 class EmotionData(BaseModel):
     state: str = "neutral"
@@ -78,9 +93,25 @@ class IntentData(BaseModel):
     notify_caregiver: bool = False
     call_family: bool = False
 
+class ReminderPlan(BaseModel):
+    action: str = "none"
+    title: Optional[str] = None
+    message: Optional[str] = None
+    due_at: Optional[str] = None
+    dueAt: Optional[str] = None
+    timezone: Optional[str] = None
+    recurrence_rule: Optional[str] = None
+    recurrenceRule: Optional[str] = None
+    confidence: float = 0.0
+    clarification_question: Optional[str] = None
+    clarificationQuestion: Optional[str] = None
+
 class LatencyBreakdown(BaseModel):
     audio_ms: float
     stt_ms: float
+    response_ms: float
+    emotion_ms: float
+    reminder_ms: float
     ai_ms: float
     tts_ms: float
     total_ms: float
@@ -96,6 +127,7 @@ class ProcessAudioResponse(BaseModel):
     responseSource: str
     emotion: EmotionData
     intent: IntentData
+    reminder: ReminderPlan
     latency_ms: float
     latency: LatencyBreakdown
 
@@ -149,6 +181,9 @@ class VoiceProcessor:
             tts_voice=request.headers.get("x-voice-tts-voice", ""),
             tts_rate=request.headers.get("x-voice-rate", self.tts_rate),
             enabled=request.headers.get("x-voice-enabled", "true").lower() != "false",
+            elder_name=request.headers.get("x-elder-name", "").strip(),
+            timezone=request.headers.get("x-elder-timezone", "Asia/Jakarta").strip() or "Asia/Jakarta",
+            context=request.headers.get("x-voice-context", "").strip(),
         )
 
     # ── Layer 0: STT (Local Faster-Whisper) ───────────────────────────────────
@@ -184,7 +219,7 @@ class VoiceProcessor:
                 temp_file.unlink()
 
     # ── Layer 1: Conversational Response (Ollama API) ────────────────────────
-    async def response_for(self, transcript: str, language: str) -> tuple[str, str]:
+    async def response_for(self, transcript: str, language: str, elder_name: str = "", context: str = "") -> tuple[str, str]:
         text = self._normalize(transcript)
         if not text:
             return "I'm sorry, I didn't catch that. Could you please repeat slowly?", "fallback"
@@ -193,9 +228,13 @@ class VoiceProcessor:
             return self._fallback_response_for(transcript, language), "fallback"
 
         try:
+            name_instruction = f"The elder's preferred name is {elder_name}. Use it naturally, not in every sentence. " if elder_name else ""
+            context_instruction = f"Relevant care context:\n{context}\n" if context else ""
             system_instruction = (
                 "You are Eldora, a warm voice companion for elderly users. "
-                "Speak warmly, clearly, and concisely in English. "
+                f"{name_instruction}"
+                f"{context_instruction}"
+                "Speak warmly, clearly, and concisely in English or Indonesian based on the user's language. "
                 "You must respond in EXACTLY 1 or 2 short sentences. Do NOT write more than 2 sentences under any circumstance. "
                 "If there is an emergency, a fall, pain, or a request for help, reassure the user and let them know their caregiver will be notified."
             )
@@ -321,6 +360,131 @@ class VoiceProcessor:
             return IntentData(name="emotional_support", confidence=0.75, notify_caregiver=False)
         return IntentData(name="general", confidence=0.5)
 
+    # ── Layer 4: Reminder Planner (fast local + optional Ollama JSON) ─────────
+    async def plan_reminder(self, transcript: str, language: str, timezone: str) -> ReminderPlan:
+        text = self._normalize(transcript)
+        if not self._looks_like_reminder_request(text):
+            return ReminderPlan()
+
+        local_plan = self._parse_local_reminder(text, timezone)
+        if local_plan.action != "none":
+            return local_plan
+
+        if not OLLAMA_API_URL:
+            return ReminderPlan(
+                action="clarify_reminder",
+                confidence=0.4,
+                clarification_question="Jam berapa saya harus mengingatkan?",
+            )
+
+        try:
+            prompt = (
+                f'Transcript: "{transcript}"\n'
+                f'Timezone: "{timezone}"\n'
+                f'Current time: "{self._now(timezone).isoformat()}"\n\n'
+                'Extract an elder reminder request. Respond JSON only:\n'
+                '{"action":"none|create_reminder|clarify_reminder", "title":"short title", "message":"reminder message", '
+                '"dueAt":"ISO-8601 datetime or null", "timezone":"timezone", "recurrenceRule":null, '
+                '"confidence":0.0, "clarificationQuestion":"question or null"}'
+            )
+            payload = {
+                "model": OLLAMA_MODEL_NAME,
+                "messages": [
+                    {"role": "system", "content": "You extract reminder commands for elderly care. Respond strictly in JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                "options": {"temperature": 0.1, "num_predict": 100},
+                "keep_alive": -1,
+                "stream": False,
+            }
+            async with httpx.AsyncClient() as client:
+                response = await client.post(OLLAMA_API_URL, json=payload, headers=ollama_headers(), timeout=3.0)
+                response.raise_for_status()
+                data = response.json()
+                result_text = data["message"]["content"].strip()
+                match = re.search(r"\{.*?\}", result_text, re.DOTALL)
+                if not match:
+                    return ReminderPlan(action="clarify_reminder", confidence=0.4, clarification_question="Bisa ulangi pengingatnya untuk jam berapa?")
+                parsed = json.loads(match.group())
+                action = str(parsed.get("action", "none"))
+                due_at = parsed.get("dueAt") or parsed.get("due_at")
+                return ReminderPlan(
+                    action=action,
+                    title=parsed.get("title"),
+                    message=parsed.get("message"),
+                    due_at=due_at,
+                    dueAt=due_at,
+                    timezone=parsed.get("timezone") or timezone,
+                    recurrence_rule=parsed.get("recurrenceRule"),
+                    recurrenceRule=parsed.get("recurrenceRule"),
+                    confidence=float(parsed.get("confidence", 0.5)),
+                    clarification_question=parsed.get("clarificationQuestion"),
+                    clarificationQuestion=parsed.get("clarificationQuestion"),
+                )
+        except Exception as e:
+            log_event("ollama_reminder_failed", error=str(e), language=language, model=OLLAMA_MODEL_NAME)
+            return ReminderPlan(action="clarify_reminder", confidence=0.4, clarification_question="Bisa ulangi pengingatnya untuk jam berapa?")
+
+    def _looks_like_reminder_request(self, text: str) -> bool:
+        terms = [
+            "ingatkan", "ingetin", "remind me", "reminder", "jangan lupa", "nanti ingatkan",
+        ]
+        return any(term in text for term in terms)
+
+    def _now(self, timezone: str) -> datetime:
+        try:
+            return datetime.now(ZoneInfo(timezone))
+        except Exception:
+            return datetime.now(ZoneInfo("Asia/Jakarta"))
+
+    def _parse_local_reminder(self, text: str, timezone: str) -> ReminderPlan:
+        now = self._now(timezone)
+        recurrence_rule = None
+        if any(term in text for term in ["setiap hari", "tiap hari", "daily", "every day"]):
+            recurrence_rule = "FREQ=DAILY"
+
+        match = re.search(r"(?:jam|pukul|at)\s*(\d{1,2})(?:[:.](\d{2}))?\s*(pagi|siang|sore|malam|am|pm)?", text)
+        if not match:
+            return ReminderPlan(action="clarify_reminder", confidence=0.55, clarification_question="Jam berapa saya harus mengingatkan?")
+
+        hour = int(match.group(1))
+        minute = int(match.group(2) or "0")
+        period = match.group(3)
+        if period in {"siang", "sore", "malam", "pm"} and hour < 12:
+            hour += 12
+        if period == "pagi" and hour == 12:
+            hour = 0
+        if not period and hour <= 7 and "nanti" in text and now.hour >= hour:
+            hour += 12
+        if hour > 23 or minute > 59:
+            return ReminderPlan(action="clarify_reminder", confidence=0.45, clarification_question="Jamnya belum jelas. Bisa sebutkan ulang waktunya?")
+
+        due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if any(term in text for term in ["besok", "tomorrow"]):
+            due += timedelta(days=1)
+        elif due <= now and not recurrence_rule:
+            due += timedelta(days=1)
+
+        message = self._reminder_message_from_text(text)
+        return ReminderPlan(
+            action="create_reminder",
+            title=message[:80],
+            message=message,
+            due_at=due.isoformat(),
+            dueAt=due.isoformat(),
+            timezone=timezone,
+            recurrence_rule=recurrence_rule,
+            recurrenceRule=recurrence_rule,
+            confidence=0.82,
+        )
+
+    def _reminder_message_from_text(self, text: str) -> str:
+        cleaned = re.sub(r"\b(eldora|tolong|please|ya)\b", " ", text)
+        cleaned = re.sub(r"\b(ingatkan|ingetin|remind me|reminder|nanti|besok|setiap hari|tiap hari|daily|every day)\b", " ", cleaned)
+        cleaned = re.sub(r"(?:jam|pukul|at)\s*\d{1,2}(?:[:.]\d{2})?\s*(?:pagi|siang|sore|malam|am|pm)?", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+        return cleaned.capitalize() if cleaned else "Pengingat dari DoraBot"
+
     # ── Fallbacks & Helpers ───────────────────────────────────────────────────
     def _fallback_response_for(self, transcript: str, language: str) -> str:
         text = self._normalize(transcript)
@@ -427,14 +591,42 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
         transcript, language, confidence = await processor.transcribe(audio_bytes, cfg.language)
         stt_ms = round((time.perf_counter() - stt_start) * 1000, 2)
 
-        # Layer 1 + Layer 2 + Layer 3 run after transcript
+        # Layer 1 + Layer 3 + Layer 4 run after transcript; Layer 2 stays local/sync
         intent = processor.analyze_intent(transcript, language)
         ai_start = time.perf_counter()
-        (message, response_source), emotion = await asyncio.gather(
-            processor.response_for(transcript, language),
-            processor.analyze_emotion(transcript, language),
+
+        async def timed_response():
+            start_at = time.perf_counter()
+            result = await processor.response_for(transcript, language, cfg.elder_name, cfg.context)
+            return result, round((time.perf_counter() - start_at) * 1000, 2)
+
+        async def timed_emotion():
+            start_at = time.perf_counter()
+            result = await processor.analyze_emotion(transcript, language)
+            return result, round((time.perf_counter() - start_at) * 1000, 2)
+
+        async def timed_reminder():
+            start_at = time.perf_counter()
+            result = await processor.plan_reminder(transcript, language, cfg.timezone)
+            return result, round((time.perf_counter() - start_at) * 1000, 2)
+
+        ((message, response_source), response_ms), (emotion, emotion_ms), (reminder, reminder_ms) = await asyncio.gather(
+            timed_response(),
+            timed_emotion(),
+            timed_reminder(),
         )
         ai_ms = round((time.perf_counter() - ai_start) * 1000, 2)
+
+        if intent.notify_caregiver:
+            reminder = ReminderPlan()
+        elif reminder.action == "clarify_reminder" and reminder.clarification_question:
+            message = reminder.clarification_question
+            response_source = "reminder_planner"
+        elif reminder.action == "create_reminder" and reminder.due_at:
+            name_prefix = f", {cfg.elder_name}" if cfg.elder_name else ""
+            due_text = format_datetime(reminder.due_at)
+            message = f"Baik{name_prefix}, saya catat ya. Nanti jam {due_text}, saya akan mengingatkan tentang {reminder.message or reminder.title or 'pengingat ini'}."
+            response_source = "reminder_planner"
 
         # TTS Synthesis — use per-request settings and pass language for auto voice packs
         tts_start = time.perf_counter()
@@ -449,6 +641,9 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
     latency = LatencyBreakdown(
         audio_ms=audio_ms,
         stt_ms=stt_ms,
+        response_ms=response_ms,
+        emotion_ms=emotion_ms,
+        reminder_ms=reminder_ms,
         ai_ms=ai_ms,
         tts_ms=tts_ms,
         total_ms=total_ms,
@@ -456,6 +651,9 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
     log_event(
         "voice_processing_completed",
         stt_ms=stt_ms,
+        response_ms=response_ms,
+        emotion_ms=emotion_ms,
+        reminder_ms=reminder_ms,
         ai_ms=ai_ms,
         tts_ms=tts_ms,
         total_ms=total_ms,
@@ -464,6 +662,8 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
         emotion_confidence=emotion.confidence,
         intent=intent.name,
         intent_confidence=intent.confidence,
+        reminder_action=reminder.action,
+        reminder_confidence=reminder.confidence,
         notify_caregiver=intent.notify_caregiver,
         call_family=intent.call_family,
         language=language,
@@ -482,6 +682,7 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
         responseSource=response_source,
         emotion=emotion,
         intent=intent,
+        reminder=reminder,
         latency_ms=total_ms,
         latency=latency,
     )
