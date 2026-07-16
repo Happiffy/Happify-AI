@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -33,9 +34,22 @@ from pydantic import BaseModel
 # ==========================================
 # CONSTANTS & CONFIGURATION
 # ==========================================
-STT_MODEL_SIZE = "base"
-OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/chat")
+STT_MODEL_SIZE = os.getenv("STT_MODEL_SIZE", "base")
+STT_DEVICE = os.getenv("STT_DEVICE", "auto").lower()
+OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "").strip()
 OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "qwen2.5:1.5b")
+DEFAULT_VOICES = {
+    "id": "id-ID-GadisNeural",
+    "en": "en-US-JennyNeural",
+}
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("eldora.ai")
+
+
+def log_event(event: str, **fields) -> None:
+    payload = {"event": event, **fields}
+    logger.info(json.dumps(payload, default=str, ensure_ascii=False))
 
 # ==========================================
 # GATEWAY RESPONSE MODELS
@@ -89,24 +103,36 @@ class VoiceProcessor:
         self.stt_device = "cpu"
 
     def load(self) -> None:
-        try:
-            print("Initializing local Faster-Whisper on GPU (CUDA)...")
-            # Load Faster-Whisper on CUDA with float16 for fast GPU inference
+        if STT_DEVICE in {"cuda", "gpu"}:
+            log_event("stt_load_start", device="cuda", model=STT_MODEL_SIZE)
             self.stt_model = WhisperModel(STT_MODEL_SIZE, device="cuda", compute_type="float16")
             self.stt_device = "cuda"
-            print("STT model loaded successfully on GPU (CUDA). Gateway is ready.")
-        except Exception as e:
-            print(f"Failed to load Faster-Whisper on GPU: {e}")
-            print("Falling back to local Faster-Whisper on CPU...")
-            # Load Faster-Whisper on CPU with 4 threads for faster execution
+            log_event("stt_load_success", device="cuda", model=STT_MODEL_SIZE)
+            return
+
+        if STT_DEVICE == "cpu":
+            log_event("stt_load_start", device="cpu", model=STT_MODEL_SIZE)
             self.stt_model = WhisperModel(STT_MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=4)
             self.stt_device = "cpu"
-            print("STT model loaded successfully on CPU. Gateway is ready.")
+            log_event("stt_load_success", device="cpu", model=STT_MODEL_SIZE)
+            return
+
+        try:
+            log_event("stt_load_start", device="cuda", model=STT_MODEL_SIZE)
+            self.stt_model = WhisperModel(STT_MODEL_SIZE, device="cuda", compute_type="float16")
+            self.stt_device = "cuda"
+            log_event("stt_load_success", device="cuda", model=STT_MODEL_SIZE)
+        except Exception as e:
+            log_event("stt_load_failed", device="cuda", model=STT_MODEL_SIZE, error=str(e))
+            log_event("stt_load_start", device="cpu", model=STT_MODEL_SIZE)
+            self.stt_model = WhisperModel(STT_MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=4)
+            self.stt_device = "cpu"
+            log_event("stt_load_success", device="cpu", model=STT_MODEL_SIZE)
 
     def config_from_request(self, request: Request) -> VoiceRequestConfig:
         return VoiceRequestConfig(
             language=request.headers.get("x-voice-language", self.language),
-            tts_voice=request.headers.get("x-voice-tts-voice", self.tts_voice),
+            tts_voice=request.headers.get("x-voice-tts-voice", ""),
             tts_rate=request.headers.get("x-voice-rate", self.tts_rate),
             enabled=request.headers.get("x-voice-enabled", "true").lower() != "false",
         )
@@ -131,7 +157,7 @@ class VoiceProcessor:
             transcript, detected_lang, confidence = await loop.run_in_executor(None, run_whisper)
             
             if confidence < 0.7:
-                print(f"[COMPLIANCE ALERT] Low STT confidence ({confidence:.2f}).")
+                log_event("stt_low_confidence", confidence=round(confidence, 4), detected_language=detected_lang)
                 if detected_lang != "en":
                     detected_lang = "en"
                     
@@ -150,6 +176,9 @@ class VoiceProcessor:
             fallback = "Maaf, saya tidak mendengar dengan jelas. Bisa diulangi?" if language == "id" else "I'm sorry, I didn't catch that. Could you please repeat slowly?"
             return fallback, "fallback"
             
+        if not OLLAMA_API_URL:
+            return self._fallback_response_for(transcript, language), "fallback"
+
         try:
             # Set system prompts based on language
             if language == "id":
@@ -190,13 +219,13 @@ class VoiceProcessor:
                     return content[:260], "ollama_qwen"
                     
         except Exception as e:
-            print(f"Ollama response generation failed: {e}")
+            log_event("ollama_response_failed", error=str(e), language=language, model=OLLAMA_MODEL_NAME)
             
         return self._fallback_response_for(transcript, language), "fallback"
 
     # ── Layer 3: Emotion Metrics (Ollama API) ─────────────────────────
     async def analyze_emotion(self, transcript: str, language: str) -> EmotionData:
-        if not transcript.strip():
+        if not transcript.strip() or not OLLAMA_API_URL:
             return EmotionData(state="neutral", confidence=0.0)
             
         try:
@@ -234,21 +263,24 @@ class VoiceProcessor:
                         confidence=float(data_json.get("confidence", 0.5)),
                     )
         except Exception as e:
-            print(f"Ollama emotion analysis failed: {e}")
+            log_event("ollama_emotion_failed", error=str(e), language=language, model=OLLAMA_MODEL_NAME)
             
         return EmotionData(state="neutral", confidence=0.5)
 
     # ── Local TTS (Edge-TTS) ──────────────────────────────────────────────────
     async def generate_audio(self, text: str, cfg: Optional[VoiceRequestConfig] = None, language: str = "id") -> Optional[str]:
+        if cfg and not cfg.enabled:
+            return None
+
         clean_text = self._clean_for_tts(text)
         if not clean_text:
             return None
             
-        voice = cfg.tts_voice if cfg else self.tts_voice
-        if voice == "en-US-JennyNeural" and language == "id":
-            voice = "id-ID-GadisNeural"
-        elif voice == "id-ID-GadisNeural" and language == "en":
-            voice = "en-US-JennyNeural"
+        header_voice = cfg.tts_voice if cfg else None
+        configured_default = self.tts_voice or DEFAULT_VOICES.get(language, DEFAULT_VOICES["en"])
+        voice = header_voice or configured_default
+        if not header_voice and language in DEFAULT_VOICES:
+            voice = DEFAULT_VOICES[language]
             
         rate = cfg.tts_rate if cfg else self.tts_rate
         
@@ -316,21 +348,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def request_logger(request: Request, call_next):
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception as error:
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        log_event("request_failed", method=request.method, path=request.url.path, duration_ms=duration_ms, error=str(error))
+        raise
+
+    duration_ms = round((time.perf_counter() - start) * 1000, 2)
+    log_event("request_completed", method=request.method, path=request.url.path, status=response.status_code, duration_ms=duration_ms)
+    return response
+
+
 @app.on_event("startup")
 async def startup() -> None:
+    log_event("startup", stt_model=STT_MODEL_SIZE, stt_device=STT_DEVICE, ollama_configured=bool(OLLAMA_API_URL))
     processor.load()
+    log_event("startup_ready", active_stt_device=processor.stt_device, default_language=processor.language, default_voice=processor.tts_voice)
 
 @app.get("/health")
 async def health() -> dict:
-    status = "healthy"
-    try:
-        async with httpx.AsyncClient() as client:
-            # Query the root Ollama service endpoint instead of /api which returns 404
-            res = await client.get(OLLAMA_API_URL.split("/api")[0] + "/", timeout=1.0)
-            if res.status_code != 200:
-                status = "unhealthy_ollama_not_responding"
-    except Exception:
-        status = "ollama_not_reachable"
+    status = "not_configured"
+    if OLLAMA_API_URL:
+        try:
+            async with httpx.AsyncClient() as client:
+                res = await client.get(OLLAMA_API_URL.split("/api")[0] + "/", timeout=1.0)
+                if res.status_code == 200:
+                    status = "healthy"
+                else:
+                    status = "unhealthy_ollama_not_responding"
+        except Exception:
+            status = "ollama_not_reachable"
         
     return {
         "status": "healthy" if processor.stt_model is not None and status == "healthy" else "degraded",
@@ -348,7 +400,10 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
     audio_ms = round((time.perf_counter() - start) * 1000, 2)
 
     if len(audio_bytes) < 1000:
+        log_event("voice_rejected", reason="audio_too_short", bytes=len(audio_bytes), language=cfg.language)
         raise HTTPException(status_code=400, detail="Audio stream is too short")
+
+    log_event("voice_processing_started", bytes=len(audio_bytes), language=cfg.language, voice=cfg.tts_voice or processor.tts_voice, rate=cfg.tts_rate, voice_enabled=cfg.enabled)
 
     try:
         # Layer 0: STT — must complete before response generation
@@ -370,7 +425,7 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
         tts_ms = round((time.perf_counter() - tts_start) * 1000, 2)
 
     except Exception as error:
-        print(f"Error processing audio interaction: {error}")
+        log_event("voice_processing_failed", error=str(error), language=cfg.language, voice=cfg.tts_voice or processor.tts_voice)
         raise HTTPException(status_code=500, detail=str(error)) from error
 
     total_ms = round((time.perf_counter() - start) * 1000, 2)
@@ -381,11 +436,19 @@ async def process_audio(request: Request) -> ProcessAudioResponse:
         tts_ms=tts_ms,
         total_ms=total_ms,
     )
-    print(
-        f"[VOICE] stt={stt_ms}ms ai={ai_ms}ms tts={tts_ms}ms total={total_ms}ms "
-        f"source={response_source} emotion={emotion.state}({emotion.confidence:.2f}) "
-        f"voice={cfg.tts_voice}",
-        flush=True,
+    log_event(
+        "voice_processing_completed",
+        stt_ms=stt_ms,
+        ai_ms=ai_ms,
+        tts_ms=tts_ms,
+        total_ms=total_ms,
+        response_source=response_source,
+        emotion=emotion.state,
+        emotion_confidence=emotion.confidence,
+        language=language,
+        confidence=confidence,
+        voice=cfg.tts_voice or processor.tts_voice,
+        audio_cached=bool(audio_url),
     )
     return ProcessAudioResponse(
         text=transcript,
@@ -406,6 +469,7 @@ async def test_tts(request: Request, body: TestTTSRequest) -> dict:
     cfg = processor.config_from_request(request)
     text = body.text or "Hello! I am Eldora, your voice companion. I am here whenever you need me."
     audio_url = await processor.generate_audio(text, cfg, cfg.language)
+    log_event("tts_preview_generated", language=cfg.language, voice=cfg.tts_voice or processor.tts_voice, rate=cfg.tts_rate, audio_cached=bool(audio_url))
     return {"audio_url": audio_url, "audioUrl": audio_url, "text": text}
 
 @app.get("/api/audio/{filename}")
@@ -417,4 +481,4 @@ def get_audio(filename: str) -> FileResponse:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

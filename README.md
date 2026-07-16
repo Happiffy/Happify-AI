@@ -76,8 +76,38 @@ python main.py
 ```
 The gateway will start on `http://127.0.0.1:8000`. It automatically handles:
 - Audio uploads via `/api/process-audio`.
+- TTS previews via `/api/test-tts`.
 - Auto-caching of generated TTS speech under `audio_cache/`.
+- Per-request voice switching through headers: `X-Voice-Language`, `X-Voice-TTS-Voice`, `X-Voice-Rate`, `X-Voice-Enabled`.
 - Asynchronous logging of senior emotional status.
+
+---
+
+## 🚄 Railway Deployment
+
+Railway uses the included `Dockerfile` and `railway.json`.
+
+Required / recommended environment variables:
+```env
+PORT=8000
+STT_MODEL_SIZE=base
+STT_DEVICE=cpu
+VOICE_LANGUAGE=id
+VOICE_TTS_VOICE=id-ID-GadisNeural
+VOICE_TTS_RATE=-10%
+VOICE_AUDIO_CACHE_DIR=/app/audio_cache
+OLLAMA_API_URL=https://your-ollama-service.example.com/api/chat
+OLLAMA_MODEL_NAME=qwen2.5:1.5b
+```
+
+Notes:
+- `OLLAMA_API_URL` must point to a reachable hosted Ollama/OpenAI-compatible gateway for AI responses on Railway.
+- If `OLLAMA_API_URL` is empty/unreachable, the service still runs with local STT + fallback responses + TTS.
+- Backend should point to this Railway service:
+```env
+VOICE_AUDIO_PROCESSOR_URL=https://your-ai-eldora.up.railway.app/api/process-audio
+VOICE_AUDIO_BASE_URL=https://your-ai-eldora.up.railway.app
+```
 
 ---
 

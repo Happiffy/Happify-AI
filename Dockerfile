@@ -28,12 +28,15 @@ EXPOSE 8000
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1
-ENV OLLAMA_API_URL=http://host.docker.internal:11434/api/chat
+ENV PORT=8000
+ENV OLLAMA_API_URL=
 ENV VOICE_LANGUAGE=id
 ENV VOICE_TTS_VOICE=id-ID-GadisNeural
 ENV VOICE_TTS_RATE=-10%
 ENV VOICE_AUDIO_CACHE_DIR=/app/audio_cache
 ENV HF_HOME=/app/.hf_cache
+ENV STT_MODEL_SIZE=base
+ENV STT_DEVICE=auto
 
 # Command to run the gateway server
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
