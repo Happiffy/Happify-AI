@@ -1,0 +1,11 @@
+# Virtual environment
+env_dorabot/
+
+# Cache directories
+.hf_cache/
+__pycache__/
+*.pyc
+
+# Local settings / OS files
+.DS_Store
+Thumbs.db
