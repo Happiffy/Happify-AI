@@ -1,0 +1,32 @@
+{
+  "source_id": "happify-support-guidance",
+  "title": "Happify Support Guidance",
+  "version": "1.0.0",
+  "entries": [
+    {
+      "id": "immediate-safety",
+      "title": "Immediate safety",
+      "text": "When someone says they may harm themselves, cannot stay safe, or is in immediate danger, encourage them to contact local emergency services and a trusted person now. Keep the message direct, calm, and supportive. Do not leave urgent safety decisions to generated text."
+    },
+    {
+      "id": "panic-grounding",
+      "title": "Grounding during intense distress",
+      "text": "For intense distress or panic language, use short sentences and offer one simple grounding step, such as noticing the floor under their feet or taking a slow, comfortable breath. Encourage urgent help when the person reports immediate danger or serious physical symptoms."
+    },
+    {
+      "id": "connection",
+      "title": "Social connection",
+      "text": "For loneliness, acknowledge the feeling without judgment and suggest one manageable connection step, such as messaging a trusted person or joining a familiar shared activity. Avoid promises that the assistant cannot keep."
+    },
+    {
+      "id": "general-support",
+      "title": "General supportive conversation",
+      "text": "Reflect the user's main concern in plain English, avoid diagnosis, and suggest at most one small next step. Keep voice responses to one or two short sentences."
+    },
+    {
+      "id": "medication-boundary",
+      "title": "Medication boundary",
+      "text": "Do not provide medication dosing or timing instructions. Encourage the user to follow their prescribed instructions or contact a qualified clinician or pharmacist when they are unsure."
+    }
+  ]
+}

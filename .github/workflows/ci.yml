@@ -1,0 +1,85 @@
+name: AI CI and Railway deploy
+
+on:
+  pull_request:
+  push:
+     branches:
+       - main
+       - master
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.lock
+      - name: Test
+        run: python -m unittest test_runtime.py
+      - name: Compile Python
+        run: python -m compileall -q main.py test_suite.py test_runtime.py
+      - name: Validate governed assets
+        env:
+          AI_SERVICE_TOKEN: ci-validation-token
+          STT_MODEL_PATH: ci-model-placeholder
+        run: |
+          python - <<'PY'
+          import main
+          main.prompt_registry.load()
+          main.knowledge_base.load()
+          assert main.prompt_registry.ready
+          assert main.knowledge_base.ready
+          PY
+      - name: Validate Railway configuration
+        run: python -m json.tool railway.json > /dev/null
+      - name: Build Docker image
+        run: docker build --tag happify-ai:${{ github.sha }} .
+
+  deploy:
+    needs: verify
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name != 'pull_request'
+
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+      RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+      RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Validate Railway configuration
+        run: |
+          set -euo pipefail
+          for name in RAILWAY_TOKEN RAILWAY_PROJECT_ID RAILWAY_SERVICE RAILWAY_ENVIRONMENT; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing Railway secret or variable: $name"
+              exit 1
+            fi
+          done
+      - name: Deploy to Railway
+        run: >
+          npx --yes @railway/cli@5.26.1 up
+          --ci
+          --project "$RAILWAY_PROJECT_ID"
+          --service "$RAILWAY_SERVICE"
+          --environment "$RAILWAY_ENVIRONMENT"

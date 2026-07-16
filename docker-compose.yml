@@ -1,32 +1,24 @@
-version: '3.8'
-
 services:
-  eldora-gateway:
+  happify-ai:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: eldora-gateway
+    container_name: happify-ai
     ports:
       - "8000:8000"
     volumes:
-      # Persistent cache mappings so model downloads and speech files are preserved
-      - ./audio_cache:/app/audio_cache
-      - ./.hf_cache:/app/.hf_cache
+      - ./audio_cache:/data/audio_cache
+      - ./temp_audio:/tmp/happify
     environment:
-      - OLLAMA_API_URL=http://host.docker.internal:11434/api/chat
-      - VOICE_LANGUAGE=en
-      - VOICE_TTS_VOICE=en-US-JennyNeural
-      - VOICE_TTS_RATE=-10%
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:?AI_SERVICE_TOKEN is required}
+      OLLAMA_API_URL: http://host.docker.internal:11434/api/chat
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      OLLAMA_MODEL_NAME: ${OLLAMA_MODEL_NAME:-qwen2.5:1.5b}
+      VOICE_LANGUAGE: en
+      VOICE_TTS_VOICE: en-US-JennyNeural
+      VOICE_TTS_RATE: -10%
+      CACHE_CLEANUP_INTERVAL_SECONDS: ${CACHE_CLEANUP_INTERVAL_SECONDS:-900}
+      TTS_CACHE_TTL_SECONDS: ${TTS_CACHE_TTL_SECONDS:-86400}
+      TEMP_FILE_TTL_SECONDS: ${TEMP_FILE_TTL_SECONDS:-3600}
     extra_hosts:
-      # Allows the container to communicate with Ollama running on the host machine
       - "host.docker.internal:host-gateway"
-    
-    # Enable NVIDIA GPU acceleration inside the container (requires NVIDIA Container Toolkit on the host)
-    # If the host doesn't have a GPU or NVIDIA Container Runtime, remove this block to run on CPU.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]

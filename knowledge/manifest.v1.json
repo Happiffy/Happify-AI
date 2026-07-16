@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_version": "1.0.0",
+  "sources": [
+    {
+      "source_id": "happify-support-guidance",
+      "title": "Happify Support Guidance",
+      "version": "1.0.0",
+      "path": "sources/support_guidance.v1.json",
+      "sha256": "784188eca7a0445da65b849e277bb89de6fa8f30246e854a2a7bb8901494e6d5"
+    }
+  ]
+}
