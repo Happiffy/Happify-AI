@@ -1,11 +1,39 @@
-# Virtual environment
+# Virtual Environment
 env_dorabot/
 
-# Cache directories
+# Hugging Face Cache
 .hf_cache/
+
+# Python Cache
 __pycache__/
 *.pyc
+.ipynb_checkpoints/
 
-# Local settings / OS files
+# Eldora Audio Caching & Temp Files
+audio_cache/
+temp_audio/
+
+# Models & Weights (Large Binaries)
+*.gguf
+eldercare_adapter/
+merged_eldercare_qwen2/
+lora_checkpoints/
+
+# Generated Evaluation Metrics Charts
+latency_metrics.png
+accuracy_metrics.png
+
+# Telemetry Logs and Runtime Files
+wellness_signals_log.json
+
+# Temporary Audio Files and Input/Output Audio
+elder_input.wav
+dorabot_output.mp3
+*.mp3
+test_audio/*.wav
+!test_audio/.gitkeep
+
+# Local Settings & OS Files
 .DS_Store
 Thumbs.db
+desktop.ini

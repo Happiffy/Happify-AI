@@ -1,0 +1,62 @@
+[
+  {
+    "audio_file": "test_audio/1.wav",
+    "ground_truth": "I fell down in the living room and cannot get up",
+    "expected_language": "en",
+    "expected_trigger": "emergency_call"
+  },
+  {
+    "audio_file": "test_audio/2.wav",
+    "ground_truth": "Dada saya sakit sekali rasanya sesak",
+    "expected_language": "id",
+    "expected_trigger": "emergency_call"
+  },
+  {
+    "audio_file": "test_audio/3.wav",
+    "ground_truth": "Apakah sudah waktunya minum obat tensi saya",
+    "expected_language": "id",
+    "expected_trigger": "medication_log"
+  },
+  {
+    "audio_file": "test_audio/4.wav",
+    "ground_truth": "I just took my blue pill for diabetes",
+    "expected_language": "en",
+    "expected_trigger": "medication_log"
+  },
+  {
+    "audio_file": "test_audio/5.wav",
+    "ground_truth": "I am feeling very lonely today nobody called me",
+    "expected_language": "en",
+    "expected_trigger": null
+  },
+  {
+    "audio_file": "test_audio/6.wav",
+    "ground_truth": "Saya sedih sekali anak anak tidak ada yang berkunjung minggu ini",
+    "expected_language": "id",
+    "expected_trigger": null
+  },
+  {
+    "audio_file": "test_audio/7.wav",
+    "ground_truth": "Selamat pagi Dora bagaimana cuaca hari ini",
+    "expected_language": "id",
+    "expected_trigger": null
+  },
+  {
+    "audio_file": "test_audio/8.wav",
+    "ground_truth": "Tell me a short story I want to hear something nice",
+    "expected_language": "en",
+    "expected_trigger": null
+  },
+  {
+    "audio_file": "test_audio/9.wav",
+    "ground_truth": "Tolong panggilkan anak saya saya mau minta air",
+    "expected_language": "id",
+    "expected_trigger": "family_call"
+  },
+  {
+    "audio_file": "test_audio/10.wav",
+    "ground_truth": "Can you call Budi I need some help in the kitchen",
+    "expected_language": "en",
+    "expected_trigger": "family_call"
+  }
+]
