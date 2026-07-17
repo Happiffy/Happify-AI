@@ -999,6 +999,7 @@ class VoiceProcessor:
             "keep_alive": -1,
             "stream": False,
         }
+        started = time.perf_counter()
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 OLLAMA_API_URL,
@@ -1006,9 +1007,30 @@ class VoiceProcessor:
                 headers=ollama_headers(),
                 timeout=timeout,
             )
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            log_event(
+                "ollama_proxy_response",
+                endpoint=OLLAMA_API_URL,
+                model=OLLAMA_MODEL_NAME,
+                status=response.status_code,
+                duration_ms=duration_ms,
+                content_type=response.headers.get("content-type", ""),
+                has_api_key=bool(OLLAMA_API_KEY),
+            )
             response.raise_for_status()
             data = response.json()
-            return self.normalize_response(data["message"]["content"] or "")
+            content = data.get("message", {}).get("content", "")
+            if not isinstance(content, str):
+                log_event(
+                    "ollama_proxy_invalid_payload",
+                    endpoint=OLLAMA_API_URL,
+                    model=OLLAMA_MODEL_NAME,
+                    top_level_keys=sorted(data.keys())
+                    if isinstance(data, dict)
+                    else [],
+                )
+                return ""
+            return self.normalize_response(content)
 
     async def response_for(
         self,
@@ -1049,6 +1071,8 @@ class VoiceProcessor:
                 "ollama_response_failed",
                 error_type=type(error).__name__,
                 model=OLLAMA_MODEL_NAME,
+                endpoint=OLLAMA_API_URL,
+                status=getattr(getattr(error, "response", None), "status_code", None),
             )
         return self.fallback_response_for(transcript), "fallback", metadata
 
