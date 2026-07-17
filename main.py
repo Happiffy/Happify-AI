@@ -1015,6 +1015,8 @@ class VoiceProcessor:
                 status=response.status_code,
                 duration_ms=duration_ms,
                 content_type=response.headers.get("content-type", ""),
+                www_authenticate=response.headers.get("www-authenticate", ""),
+                error_body=response.text[:200] if response.status_code >= 400 else "",
                 has_api_key=bool(OLLAMA_API_KEY),
             )
             response.raise_for_status()
